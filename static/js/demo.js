@@ -505,10 +505,15 @@ document.addEventListener('DOMContentLoaded', () => {
             const meta = data.total_slices > 1
                 ? `${modalityLabel} · ${data.total_slices} slices in series (using ${data.prompt_slices} key slices)`
                 : `${modalityLabel} · single image`;
+            let capNote = '';
+            if (data.total_slices > 1 && data.prompt_slices < idcSlices
+                && data.prompt_slices === data.total_slices) {
+                capNote = `\n*(Slices is a maximum; this study has only ${data.total_slices} images.)*`;
+            }
             const sourceLine = [data.source, data.body_part, data.series]
                 .filter(Boolean)
                 .join(' · ');
-            const header = `**${meta}**` + (sourceLine ? `\n*Source: ${sourceLine}*` : '');
+            const header = `**${meta}**` + (sourceLine ? `\n*Source: ${sourceLine}*` : '') + capNote;
 
             if (uploadResult) {
                 renderMarkdown(uploadResult, `${header}\n\n${data.explanation || ''}`);
