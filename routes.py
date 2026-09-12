@@ -483,21 +483,24 @@ def upload_explain():
             f.save(tmp_path)
             saved_paths.append(tmp_path)
 
-        plain_image_exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'}
-        if all(p.suffix.lower() in plain_image_exts for p in saved_paths):
-            previews = imaging.process_plain_images(saved_paths)
-            result = {"modality": modality_override or "X-ray",
-                      "total_slices": 1,
-                      "prompt_slices": len(previews),
-                      "previews": previews}
-        else:
-            result = imaging.process_upload_dicom(saved_paths, max_slices=max_slices)
-            if modality_override:
-                result["modality"] = modality_override
+        # Auto-detect reads DICOM tags; for JPG/PNG-only stacks the tag is
+        # missing so the default label is X-ray and the series count comes
+        # from the number of images uploaded.
+        result = imaging.process_upload(
+            saved_paths, max_slices=max_slices, modality_override=modality_override)
 
         modality = result["modality"]
         total_slices = result["total_slices"]
         previews = result["previews"]
+        warnings = list(result.get("skipped_files") or [])
+        if not modality_override and total_slices > 1 \
+                and all(p.suffix.lower() in {'.png', '.jpg', '.jpeg', '.webp',
+                                             '.bmp', '.gif'}
+                        for p in saved_paths):
+            warnings.append(
+                "Auto-detect only reads DICOM tags. Multiple JPG/PNG images are "
+                "assumed to be one study labeled X-ray — set Type above if this "
+                "is a CT/MRI series.")
 
         messages = _build_messages(result, question)
         explanation = _stream_explanation(messages, max_tokens=1536)
@@ -508,6 +511,7 @@ def upload_explain():
             "total_slices": total_slices,
             "prompt_slices": len(previews),
             "previews": previews,
+            "warnings": warnings,
             "explanation": explanation or
                            "No explanation content received from the API."
         })

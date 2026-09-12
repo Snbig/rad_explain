@@ -437,7 +437,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 : `${modalityLabel} · single image`;
 
             if (uploadResult) {
-                renderMarkdown(uploadResult, `${meta}\n\n${data.explanation || ''}`);
+                const warnings = Array.isArray(data.warnings) && data.warnings.length
+                    ? `_Note: ${data.warnings.join(' · ')}_\n\n`
+                    : '';
+                renderMarkdown(uploadResult,
+                    `${warnings}**${meta}**\n\n${data.explanation || ''}`);
                 makeResponseSentences(uploadResult);
                 hideRespExplain();
             }

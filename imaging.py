@@ -244,18 +244,35 @@ def sample_slices(parsed, max_slices=MAX_PROMPT_IMAGES):
     return [parsed[i] for i in idx]
 
 
-def process_plain_images(paths):
-    """Build prompt-ready data URLs from plain 2D image files."""
+def process_plain_images(paths, max_slices=MAX_PROMPT_IMAGES):
+    """Build prompt-ready data URLs from plain 2D image files as a series.
+
+    Each uploaded image is one "slice" of the study. Returns the same result
+    shape as ``process_upload_dicom`` (modality/total_slices/prompt_slices/
+    previews) so both branches behave the same in the API.
+    """
     previews = []
+    skipped = []
     for p in paths:
-        with Image.open(p) as im:
-            im = im.convert("RGB")
-        buf = io.BytesIO()
-        im.save(buf, format="PNG")
-        data_url = "data:image/png;base64," + base64.b64encode(
-            buf.getvalue()).decode("ascii")
-        previews.append({"label": Path(p).stem, "data_url": data_url})
-    return previews
+        try:
+            with Image.open(p) as im:
+                im = im.convert("RGB")
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            data_url = "data:image/png;base64," + base64.b64encode(
+                buf.getvalue()).decode("ascii")
+            previews.append({"label": Path(p).stem, "data_url": data_url})
+        except Exception as e:  # noqa: BLE001 - skip one bad file
+            skipped.append(f"{Path(p).name} ({e})")
+    if not previews:
+        raise ValueError("No readable image files were found in the upload.")
+    total = len(previews)
+    if total > max_slices:
+        idx = np.linspace(0, total - 1, max_slices).astype(int)
+        previews = [previews[i] for i in idx]
+    return {"modality": "X-ray", "total_slices": total,
+            "prompt_slices": len(previews), "previews": previews,
+            "skipped_files": skipped}
 
 
 def process_upload_dicom(paths, max_slices=MAX_PROMPT_IMAGES):
@@ -267,11 +284,13 @@ def process_upload_dicom(paths, max_slices=MAX_PROMPT_IMAGES):
         logger.warning("Large DICOM series (%d files); sampling for prompt.",
                        len(dicom_files))
     parsed = []
+    skipped_files = []
     for f in dicom_files:
         try:
             parsed.extend(parse_dicom_slice(f))
         except Exception as e:  # noqa: BLE001 - skip one bad file, keep the series
             logger.warning("Skipping unreadable DICOM file %s: %s", f, e)
+            skipped_files.append(f"{f.name} ({e})")
     if not parsed:
         raise ValueError("No readable DICOM slices found in the uploaded files.")
     parsed.sort(key=lambda p: p["instance"])
@@ -285,7 +304,52 @@ def process_upload_dicom(paths, max_slices=MAX_PROMPT_IMAGES):
         data_url = array_to_png_data_url(p["pixels"])
         previews.append({"label": f"Slice {i}/{total}", "data_url": data_url})
     return {"modality": modality, "total_slices": total,
-            "prompt_slices": len(previews), "previews": previews}
+            "prompt_slices": len(previews), "previews": previews,
+            "skipped_files": skipped_files[:20]}
+
+
+def process_upload(paths, max_slices=MAX_PROMPT_IMAGES, modality_override=None):
+    """Unified entry point for /upload_explain.
+
+    Splits the uploaded files into DICOM (.dcm/.dicom/.zip) and plain-image
+    (PNG/JPG/...) parts. DICOM tags drive auto-detection when present (they
+    are authoritative); plain-image-only uploads default to X-ray. Files that
+    cannot be parsed are reported in ``skipped_files`` instead of silently
+    shrinking the series.
+    """
+    plain_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+    dicom_paths, plain_paths = [], []
+    for p in paths:
+        p = Path(p)
+        if p.suffix.lower() in plain_exts:
+            plain_paths.append(p)
+        else:
+            dicom_paths.append(p)
+
+    skipped = []
+    if not dicom_paths:
+        result = process_plain_images(plain_paths, max_slices=max_slices)
+        skipped = result["skipped_files"]
+        result["modality"] = modality_override or result["modality"]
+    else:
+        dcm_result = process_upload_dicom(dicom_paths, max_slices=max_slices)
+        result = dict(dcm_result)
+        skipped = list(dcm_result["skipped_files"])
+        if plain_paths:
+            # Merge plain images in as extra slices of the same study so no
+            # file the user picked is silently dropped.
+            plain_result = process_plain_images(
+                plain_paths, max_slices=max(1, max_slices - len(result["previews"])))
+            for prev in plain_result["previews"]:
+                result["previews"].append(prev)
+            skipped += plain_result["skipped_files"]
+            result["total_slices"] = dcm_result["total_slices"] + \
+                plain_result["total_slices"]
+            result["prompt_slices"] = len(result["previews"])
+        if modality_override:
+            result["modality"] = modality_override
+    result["skipped_files"] = skipped[:20]
+    return result
 
 
 # --- NCI Imaging Data Commons (IDC) sample fetching ------------------------
