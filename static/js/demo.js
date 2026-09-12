@@ -501,7 +501,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const meta = data.total_slices > 1
                 ? `${modalityLabel} · ${data.total_slices} slices in series (using ${data.prompt_slices})`
                 : `${modalityLabel} · single image`;
-            const sourceLine = [data.source, data.body_part]
+            const sourceLine = [data.source, data.body_part, data.series]
                 .filter(Boolean)
                 .join(' · ');
             const header = `**${meta}**` + (sourceLine ? `\n*Source: ${sourceLine}*` : '');

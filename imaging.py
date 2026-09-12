@@ -58,6 +58,18 @@ IDC_MAX_INSTANCES = 60
 IDC_SIZE_MB_MIN = 1
 IDC_SIZE_MB_MAX = 80
 
+# CT collections contain scout / topogram / localizer series: 2D planar
+# projections that look like plain X-rays but carry Modality=CT. Those would
+# confuse the demo (a "CT" that looks like a chest X-ray), so exclude them.
+IDC_EXCLUDED_DESCRIPTIONS = (
+    "SCOUT", "TOPOGRAM", "TOPAGRAM", "LOCALIZER", "LOCALIZ",
+    "SURVEY", "SCANOGRAM", "PLANAR", "TEXT"
+)
+# Minimum number of instances required per modality so a "CT" is really a
+# volumetric series with enough slices to honor the chosen Slice count.
+# MRI is exempt: many valid single-file multi-frame MR exams have 1 instance.
+IDC_MIN_INSTANCES = {"X-ray": 1, "CT": 8, "MRI": 1}
+
 
 def array_to_png_data_url(pixels):
     """Encode a 2D uint8 numpy array as a PNG data URL."""
@@ -108,7 +120,7 @@ def _is_dicom_file(path):
     return suffix in {".dcm", ".dicom"}
 
 
-def parse_dicom_slice(dicom_path, max_frames=8):
+def parse_dicom_slice(dicom_path, max_frames=MAX_PROMPT_IMAGES):
     """Read a DICOM file and return a list of windowed 2D slice dicts.
 
     One entry per *visible frame*: single-frame DICOM yields one entry, while
@@ -277,6 +289,9 @@ def search_idc_series(modality, limit=3, preferred_body_parts=None):
 
     in_mods = ", ".join(f"'{m}'" for m in modality_tags)
     in_body = ", ".join(f"'{b}'" for b in preferred)
+    scout_filters = " AND ".join(
+        f"UPPER(COALESCE(i.SeriesDescription, '')) NOT LIKE '%{s}%'"
+        for s in IDC_EXCLUDED_DESCRIPTIONS)
     query = f"""
 SELECT i.SeriesInstanceUID AS SeriesInstanceUID,
        i.collection_id AS collection_id,
@@ -289,18 +304,20 @@ FROM index i
 WHERE i.Modality IN ({in_mods})
   AND i.series_size_MB > {IDC_SIZE_MB_MIN}
   AND i.series_size_MB < {IDC_SIZE_MB_MAX}
+  AND {scout_filters}
 ORDER BY CASE WHEN i.BodyPartExamined IN ({in_body}) THEN 0 ELSE 1 END,
          random()
-LIMIT 20
+LIMIT 40
 """
     rows = client.sql_query(query)
     if rows is None or len(rows) == 0:
         raise ValueError(
             f"No public {modality} series found in IDC for this query.")
+    min_instances = IDC_MIN_INSTANCES.get(modality, 1)
     infos = []
     for r in rows.to_dict("records"):
         instances = int(r.get("n_instances") or 0)
-        if 1 <= instances <= IDC_MAX_INSTANCES:
+        if min_instances <= instances <= IDC_MAX_INSTANCES:
             infos.append({
                 "series_uid": r["SeriesInstanceUID"],
                 "collection_id": r.get("collection_id") or "",
