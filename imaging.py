@@ -259,6 +259,13 @@ def process_plain_images(paths, max_slices=MAX_PROMPT_IMAGES):
         try:
             with Image.open(p) as im:
                 im = im.convert("RGB")
+                # Same size cap as the DICOM path: keep the longest side <=
+                # MEDGEMMA_IMAGE_SIDE (default 384 px) so a single large
+                # PNG/JPG (e.g. a 2k px CT export) does not blow past the
+                # GPU prefill token budget and get rejected with 413.
+                side = _max_slice_image_side()
+                if side is not None and max(im.size) > side:
+                    im.thumbnail((side, side), Image.LANCZOS)
             buf = io.BytesIO()
             im.save(buf, format="PNG")
             data_url = "data:image/png;base64," + base64.b64encode(
