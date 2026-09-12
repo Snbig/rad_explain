@@ -17,6 +17,7 @@ from flask import Blueprint, render_template, request, jsonify, send_from_direct
 from pathlib import Path
 import shutil # For zipping the cache directory
 import json # For parsing streamed JSON data
+import re
 
 import os
 import random
@@ -108,6 +109,32 @@ def _build_messages(result, question=""):
          "content": [{"type": "text", "text": system_prompt}]},
         {"role": "user", "content": content},
     ]
+
+
+def _dedupe_repeated_sentences(text):
+    """Drop repeated sentences (model loop artifact).
+
+    MedGemma occasionally loops and emits the same sentence periodically.
+    Splits on newlines and sentence boundaries, keeps the original separators
+    so markdown structure survives, and removes a sentence whose normalized
+    text was already emitted. Short fragments/headers (no sentence terminator
+    or <=8 chars normalized) are never treated as duplicates.
+    """
+    if not text:
+        return text
+    tokens = re.split(r"(\n|(?<=[.!?\u2026])\s+)", text.strip())
+    seen = set()
+    out = []
+    for i in range(0, len(tokens), 2):
+        part = tokens[i]
+        sep = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if re.search(r"[.!?\u2026]", part):
+            key = re.sub(r"[^a-z0-9]", "", part.lower())
+            if len(key) > 8 and key in seen:
+                continue
+            seen.add(key)
+        out.append(part + sep)
+    return "".join(out).strip()
 
 
 def _stream_explanation(messages, max_tokens=1536):
@@ -431,7 +458,8 @@ def explain_sentence():
                 elif decoded_line.strip() == "[DONE]": # Some APIs might send [DONE] without "data: "
                     break
 
-        explanation = "".join(explanation_parts).strip()
+        explanation = _dedupe_repeated_sentences(
+            "".join(explanation_parts).strip())
         if explanation:
             cache.set(cache_key, explanation, expire=None)
 

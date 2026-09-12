@@ -171,8 +171,18 @@ def generate(messages, max_new_tokens=600):
                                 if it.get("type") == "image"), _est)
                 inputs = inputs.to(_model.device, dtype=torch.bfloat16)
                 torch.cuda.empty_cache()
-                generated_sequence = _model.generate(
-                    **inputs, do_sample=False, max_new_tokens=max_new_tokens)
+                gen_kwargs = dict(
+                    do_sample=False,
+                    max_new_tokens=max_new_tokens,
+                    # Mild repetition penalty stops the model from looping on
+                    # a sentence; works deterministically with greedy decode.
+                    repetition_penalty=float(
+                        os.environ.get("REPETITION_PENALTY", "1.25")),
+                )
+                ngram = int(os.environ.get("NO_REPEAT_NGRAM_SIZE", "0"))
+                if ngram > 0:
+                    gen_kwargs["no_repeat_ngram_size"] = ngram
+                generated_sequence = _model.generate(**inputs, **gen_kwargs)
             response = _processor.post_process_image_text_to_text(
                 generated_sequence, skip_special_tokens=True)[0]
             decoded_inputs = _processor.post_process_image_text_to_text(
