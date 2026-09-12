@@ -54,7 +54,19 @@ document.addEventListener('DOMContentLoaded', () => {
         if (window.marked && typeof window.marked.parse === 'function') {
             el.innerHTML = window.marked.parse(text || '', { breaks: true, gfm: true });
         } else {
-            el.textContent = text || '';
+            // Minimal fallback: renders **bold**, *italic*, line breaks and
+            // markdown list bullets so the UI is never stuck with raw asterisks.
+            const escaped = (text || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            const html = escaped
+                .replace(/\n\n+/g, '</p><p>')
+                .replace(/\n\*\*\s*(.+?)\*\*/g, '\n<strong>$1</strong>')
+                .replace(/\n-\s+/g, '\n<li>')
+                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*(.+?)\*/g, '<em>$1</em>');
+            el.innerHTML = '<p>' + html + '</p>';
         }
     }
 
