@@ -21,6 +21,7 @@ import json # For parsing streamed JSON data
 import os
 import config
 import utils
+import imaging
 from llm_client import make_chat_completion_request, is_initialized as llm_is_initialized
 from cache_store import cache
 from cache_store import cache_directory
@@ -240,3 +241,169 @@ def explain_sentence():
         user_error_message = ("Failed to generate explanation. The service might be temporarily unavailable "
                               "and is now likely starting up. Please try again in a few moments.")
         return jsonify({"error": user_error_message}), 500
+
+
+@main_bp.route('/upload_explain', methods=['POST'])
+def upload_explain():
+    """Explains an uploaded X-ray / CT / MRI file or series via the LLM API.
+
+    Accepts single 2D images (PNG/JPEG) as well as DICOM files (.dcm, one or
+    several, or a .zip archive containing them). Volumetric series (CT / MRI)
+    are windowed and down-sampled to a small stack of slice images before
+    being sent to the multimodal MedGemma endpoint.
+    """
+    import shutil
+    import tempfile
+    import uuid
+
+    if not llm_is_initialized():
+        logger.error("LLM client (REST API) not initialized. Cannot process upload.")
+        return jsonify({"error": "LLM client (REST API) not initialized. Check API key and base URL."}), 500
+
+    uploaded_files = request.files.getlist('files')
+    uploaded_files = [f for f in uploaded_files if f.filename]
+    if not uploaded_files:
+        return jsonify({"error": "No file uploaded."}), 400
+
+    question = (request.form.get('question') or '').strip()
+    modality_override = (request.form.get('modality') or '').strip()
+    if modality_override not in ('CT', 'MRI', 'X-ray'):
+        modality_override = None
+
+    max_slices = 8
+    try:
+        max_slices = min(max(int(request.form.get('max_slices') or 8), 1), 16)
+    except ValueError:
+        max_slices = 8
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="radexplain-upload-"))
+    try:
+        saved_paths = []
+        for f in uploaded_files:
+            ext = Path(f.filename).suffix.lower()
+            if ext not in {'.dcm', '.dicom', '.zip', '.png', '.jpg', '.jpeg',
+                           '.webp', '.bmp', '.gif'}:
+                return jsonify({
+                    "error": f"Unsupported file type '{ext or '(none)'}'. "
+                             "Use PNG/JPEG images or DICOM (.dcm) files."}), 400
+            tmp_path = tmp_root / (uuid.uuid4().hex + (ext or '.bin'))
+            f.stream.seek(0)
+            f.save(tmp_path)
+            saved_paths.append(tmp_path)
+
+        plain_image_exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'}
+        if all(p.suffix.lower() in plain_image_exts for p in saved_paths):
+            previews = imaging.process_plain_images(saved_paths)
+            result = {"modality": modality_override or "X-ray",
+                      "total_slices": 1,
+                      "prompt_slices": len(previews),
+                      "previews": previews}
+        else:
+            result = imaging.process_upload_dicom(saved_paths, max_slices=max_slices)
+            if modality_override:
+                result["modality"] = modality_override
+
+        modality = result["modality"]
+        total_slices = result["total_slices"]
+        previews = result["previews"]
+
+        system_prompt = (
+            "You are an expert radiologist explaining medical images to a "
+            "non-specialist in simple, clear language. Be concise, describe what "
+            "is visible (or not), and clearly flag any uncertainty. This is for "
+            "educational purposes only and is not a diagnosis."
+        )
+
+        if total_slices > 1:
+            instruction = (
+                f"You are reviewing a {modality} series with {total_slices} "
+                "slices. The evenly-sampled slices below represent the volume. "
+                "Review them as a radiologist would a full study"
+            )
+            content = [{"type": "text", "text": instruction}]
+            for prev in previews:
+                content.append({"type": "image", "image": prev["data_url"]})
+                content.append({"type": "text", "text": f"SLICE {prev['label']}"})
+        else:
+            instruction = (
+                f"You are reviewing a {modality} image."
+            )
+            content = [{"type": "text", "text": instruction},
+                       {"type": "image", "image": previews[0]["data_url"]}]
+
+        if question:
+            content.append({"type": "text",
+                            "text": f"Question from the user: {question}"})
+        else:
+            content.append({"type": "text",
+                            "text": ("Describe the most important findings in "
+                                     "simple terms and state whether the study "
+                                     "appears normal or abnormal.")})
+
+        messages = [
+            {"role": "system",
+             "content": [{"type": "text", "text": system_prompt}]},
+            {"role": "user", "content": content},
+        ]
+
+        logger.info("Sending uploaded image request to LLM API (REST)...")
+        response = make_chat_completion_request(
+            model="tgi",
+            messages=messages,
+            top_p=None,
+            temperature=0,
+            max_tokens=600,
+            stream=True,
+            seed=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None
+        )
+
+        explanation_parts = []
+        for line in response.iter_lines():
+            if not line:
+                continue
+            decoded_line = line.decode('utf-8')
+            if decoded_line.startswith('data: '):
+                json_data_str = decoded_line[len('data: '):].strip()
+                if json_data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(json_data_str)
+                    if (chunk.get("choices") and
+                            chunk["choices"][0].get("delta") and
+                            chunk["choices"][0]["delta"].get("content")):
+                        explanation_parts.append(
+                            chunk["choices"][0]["delta"]["content"])
+                except json.JSONDecodeError:
+                    logger.warning(
+                        f"Could not decode JSON from stream chunk: {json_data_str}")
+            elif decoded_line.strip() == "[DONE]":
+                break
+
+        explanation = "".join(explanation_parts).strip()
+        if not explanation:
+            logger.warning("Empty explanation from API for uploaded image.")
+        return jsonify({
+            "modality": modality,
+            "total_slices": total_slices,
+            "prompt_slices": len(previews),
+            "previews": previews,
+            "explanation": explanation or
+                           "No explanation content received from the API."
+        })
+    except ValueError as e:
+        logger.warning(f"Invalid upload: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 400
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error during LLM API call for uploaded image: {e}", exc_info=True)
+        return jsonify({"error": ("Failed to generate explanation. The service "
+                                  "might be temporarily unavailable and is now "
+                                  "likely starting up. Please try again in a few "
+                                  "moments.")}), 500
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Unexpected error handling upload: {e}", exc_info=True)
+        return jsonify({"error": f"Unexpected error processing upload: {e}"}), 500
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)

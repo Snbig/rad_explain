@@ -34,6 +34,36 @@ document.addEventListener('DOMContentLoaded', () => {
     const appLoading = document.getElementById('app-loading');
     const appError = document.getElementById('app-error');
 
+    // Upload mode elements
+    const uploadSection = document.getElementById('upload-section');
+    const imageSection = document.querySelector('.image-section');
+    const reportSection = document.querySelector('.report-section');
+    const uploadFilesInput = document.getElementById('upload-files');
+    const uploadModality = document.getElementById('upload-modality');
+    const uploadQuestion = document.getElementById('upload-question');
+    const uploadAnalyzeButton = document.getElementById('upload-analyze');
+    const uploadStatus = document.getElementById('upload-status');
+    const uploadError = document.getElementById('upload-error');
+    const uploadPreviewGrid = document.getElementById('upload-preview-grid');
+    const uploadResult = document.getElementById('upload-result');
+    let currentMode = 'report';
+
+    function setMode(mode) {
+        currentMode = mode;
+        const uploadTabButton = caseSelectorTabsContainer?.querySelector('[data-upload-tab]');
+        if (mode === 'upload') {
+            if (uploadSection) uploadSection.style.display = 'block';
+            if (imageSection) imageSection.style.display = 'none';
+            if (reportSection) reportSection.style.display = 'none';
+            if (ctImageNote) ctImageNote.style.display = 'none';
+            if (uploadTabButton) setActiveCaseButton(uploadTabButton);
+        } else {
+            if (uploadSection) uploadSection.style.display = 'none';
+            if (imageSection) imageSection.style.display = '';
+            if (reportSection) reportSection.style.display = '';
+        }
+    }
+
     let availableReports = [];
     let currentReportName = null;
     let currentReportDetails = null;
@@ -88,6 +118,18 @@ document.addEventListener('DOMContentLoaded', () => {
             caseSelectorTabsContainer.addEventListener('click', handleCaseSelectionClick);
         }
 
+        // --- Upload mode wiring ---
+        const uploadTabButton = caseSelectorTabsContainer?.querySelector('[data-upload-tab]');
+        if (uploadTabButton && uploadSection) {
+            uploadTabButton.addEventListener('click', () => {
+                abortOngoingRequests();
+                setMode('upload');
+            });
+        }
+        if (uploadAnalyzeButton) {
+            uploadAnalyzeButton.addEventListener('click', handleUploadAnalyze);
+        }
+
         reportTextDisplay.addEventListener('click', handleSentenceClick);
 
         const firstCaseButton = caseSelectorTabsContainer?.querySelector('.nav-button-case');
@@ -108,6 +150,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (selectedName && selectedName !== currentReportName) {
             abortOngoingRequests();
             currentReportName = selectedName;
+            setMode('report');
             setActiveCaseButton(clickedButton);
             loadReportDetails(currentReportName);
         }
@@ -312,6 +355,86 @@ document.addEventListener('DOMContentLoaded', () => {
             if (error.name !== 'AbortError') {
                 displayExplanationError(`Explanation Error: ${error.message}`);
             }
+        }
+    }
+
+    async function handleUploadAnalyze() {
+        if (!uploadFilesInput || !uploadFilesInput.files || uploadFilesInput.files.length === 0) {
+            displayUploadError('Please select at least one file to upload.');
+            return;
+        }
+
+        abortOngoingRequests();
+        if (uploadError) uploadError.style.display = 'none';
+        if (uploadResult) uploadResult.textContent = '';
+        if (uploadPreviewGrid) uploadPreviewGrid.innerHTML = '';
+        if (uploadStatus) {
+            uploadStatus.textContent = 'Analyzing... The model endpoint may need to warm up for a few minutes if it was idle.';
+            uploadStatus.style.display = 'block';
+        }
+        if (uploadAnalyzeButton) uploadAnalyzeButton.disabled = true;
+
+        const formData = new FormData();
+        for (let i = 0; i < uploadFilesInput.files.length; i++) {
+            formData.append('files', uploadFilesInput.files[i]);
+        }
+        if (uploadModality && uploadModality.value) {
+            formData.append('modality', uploadModality.value);
+        }
+        if (uploadQuestion && uploadQuestion.value.trim()) {
+            formData.append('question', uploadQuestion.value.trim());
+        }
+
+        try {
+            const response = await fetch('/upload_explain', { method: 'POST', body: formData });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `HTTP error ${response.status}`);
+            }
+
+            if (uploadStatus) uploadStatus.style.display = 'none';
+
+            const modalityLabels = { 'X-ray': 'Chest X-Ray', 'CT': 'CT', 'MRI': 'MRI' };
+            const modalityLabel = modalityLabels[data.modality] || data.modality || 'Image';
+            const meta = data.total_slices > 1
+                ? `${modalityLabel} · ${data.total_slices} slices in series (using ${data.prompt_slices})`
+                : `${modalityLabel} · single image`;
+
+            if (uploadResult) {
+                uploadResult.textContent = `${meta}\n\n${data.explanation || ''}`;
+            }
+            if (data.previews && data.previews.length && uploadPreviewGrid) {
+                renderPreviewGrid(data.previews);
+            }
+        } catch (error) {
+            if (uploadStatus) uploadStatus.style.display = 'none';
+            displayUploadError(`Upload Error: ${error.message}`);
+        } finally {
+            if (uploadAnalyzeButton) uploadAnalyzeButton.disabled = false;
+        }
+    }
+
+    function renderPreviewGrid(previews) {
+        previews.forEach(prev => {
+            const cell = document.createElement('div');
+            cell.className = 'upload-preview-cell';
+            const img = document.createElement('img');
+            img.className = 'upload-preview-thumb';
+            img.src = prev.data_url;
+            img.alt = prev.label || 'slice';
+            const label = document.createElement('div');
+            label.className = 'upload-preview-label';
+            label.textContent = prev.label || '';
+            cell.appendChild(img);
+            cell.appendChild(label);
+            uploadPreviewGrid.appendChild(cell);
+        });
+    }
+
+    function displayUploadError(message) {
+        if (uploadError) {
+            uploadError.textContent = message;
+            uploadError.style.display = 'block';
         }
     }
 

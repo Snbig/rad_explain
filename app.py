@@ -27,6 +27,9 @@ def create_app():
     """Creates and configures the Flask application."""
     app = Flask(__name__, static_folder=config.STATIC_DIR)
 
+    # Cap upload size (a zip of a CT/MRI series can be large; 800 MB is ample).
+    app.config["MAX_CONTENT_LENGTH"] = 800 * 1024 * 1024
+
     # --- Configure Logging ---
     # Basic config should be done before creating the app or registering blueprints
     # if those modules rely on logging during import time.

@@ -102,6 +102,15 @@
                         {% endif %}
                     </div>
 
+                    <div>Upload</div>
+                    <div class="case-selector-tabs" id="case-selector-tabs3">
+                        <div class="nav-button nav-button-case" data-upload-tab="upload">
+                            <div class="nav-button-inner">
+                                <span class="nav-button-text">Your own image</span>
+                            </div>
+                        </div>
+                    </div>
+
             </div>
             <div class="nav-button nav-button-info" id="info-button">
                 <div class="nav-button-inner">
@@ -122,6 +131,32 @@
             </div>
             <div id="ct-image-note" class="image-note">
                 This shows a single slice of the CT. Not all elements in the report can be visualized.
+            </div>
+        </div>
+
+        <div class="upload-section" id="upload-section" style="display: none;">
+            <div class="upload-panel">
+                <div class="upload-title">Upload your own image</div>
+                <div class="upload-sub">Supports <b>Chest X-Ray</b>, <b>CT</b>, and <b>MRI</b>. Formats: PNG/JPEG for single images, DICOM (<code>.dcm</code>, one or several files) or a <code>.zip</code> of DICOM slices for CT/MRI series.</div>
+                <input type="file" id="upload-files" multiple
+                       accept=".dcm,.dicom,.png,.jpg,.jpeg,.webp,.bmp,.gif,.zip">
+                <div class="upload-controls">
+                    <label>Type</label>
+                    <select id="upload-modality">
+                        <option value="">Auto-detect</option>
+                        <option value="X-ray">Chest X-Ray</option>
+                        <option value="CT">CT</option>
+                        <option value="MRI">MRI</option>
+                    </select>
+                    <label>Question (optional)</label>
+                    <input type="text" id="upload-question"
+                           placeholder="e.g. What are the main findings?">
+                    <button id="upload-analyze" class="upload-button">Analyze</button>
+                </div>
+                <div id="upload-status" class="loading" style="display: none;"></div>
+                <div id="upload-error" class="error-message" style="display: none;"></div>
+                <div id="upload-preview-grid" class="upload-preview-grid"></div>
+                <div id="upload-result" class="upload-result"></div>
             </div>
         </div>
 

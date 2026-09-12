@@ -9,9 +9,10 @@ pinned: false
 license: apache-2.0
 short_description: Radiology Image & Report Explainer Demo. Built with MedGemma
 models:
-  - google/medgemma-4b-it
+  - google/medgemma-1.5-4b-it
 secrets:
   - HF_TOKEN
+  - MEDGEMMA_ENDPOINT_URL
 ---
 
 # Radiology Image & Report Explainer Demo - Built with MedGemma
@@ -23,7 +24,29 @@ Powered by AI (MedGemma-4B Multimodel), this space analyzes both a sample radiol
 
 This demonstration is for illustrative purposes only and does not represent a finished or approved product. It is not representative of compliance to any harmonized regulations or standards for quality, safety or efficacy. Any real-world application would require additional development, training, and adaptation. The experience highlighted in this demo shows MedGemma's baseline capability for the displayed task and is intended to help developers and users explore possible applications and inspire further development.
 
-**Note:** This space uses a HuggingFace endpoint that may scale down to zero due to inactivity. If this occurs, please allow approximately 10 minutes for the endpoint to restart. As an alternative, the model can be deployed on ModelGarden (see the link below). 
+## Upload your own image
+
+Use the main screen's dedicated **Upload** section (built with Flask + Pillow:
+`PyDICOM` handles the DICOM files) to analyze your own files instead of the
+bundled demo cases:
+
+* **Chest X-Ray / 2D images**: upload a PNG/JPEG (or a single DICOM frame).
+* **CT and MRI**: upload one or several DICOM files (`.dcm`) or a `.zip`
+  archive containing the series. MedGemma 1.5 natively interprets volumetric
+  CT *and* MRI (3D radiology); the series is windowed and down-sampled to an
+  evenly sampled slice stack before being sent to the model.
+
+The analysis prompt asks the model to describe the key findings and whether
+the study appears normal or abnormal. An optional free-text question is added
+to the prompt verbatim.
+
+**Note:** This space uses a HuggingFace endpoint that may scale down to zero due to inactivity. If this occurs, please allow approximately 10 minutes for the endpoint to restart. As an alternative, the model can be deployed on ModelGarden (see the link below).
+
+**Note for self-hosting this fork:** the app requires the `HF_TOKEN` and
+`MEDGEMMA_ENDPOINT_URL` secrets to be configured on the Space (Settings >
+Variables and Secrets). `MEDGEMMA_ENDPOINT_URL` should point at a MedGemma
+chat-completions endpoint (e.g. a Hugging Face Inference Endpoint or an
+OpenAI-compatible v1/chat/completions route).
 
 # Links
 * MedGemma HuggingFace - https://huggingface.co/collections/google/medgemma-release-680aade845f90bec6a3f60c4
