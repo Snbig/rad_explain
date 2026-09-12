@@ -664,25 +664,29 @@ SELECT i.SeriesInstanceUID AS SeriesInstanceUID,
         WHERE b.SeriesInstanceUID = i.SeriesInstanceUID) AS n_instances
 FROM index i
 """
+    # IMPORTANT: no upper size ceiling in SQL. Most real CT series in IDC are
+    # larger than 80 MB, so a hard `series_size_MB < 80` filter turned the
+    # query (and its fallback, which reused the same filter) empty and
+    # produced "No public CT series ... was found". Instead we ask for the
+    # smallest series of the modality and pick the best candidate in Python.
     where_frags = [f"i.Modality IN ({in_mods})",
                    f"i.series_size_MB > {IDC_SIZE_MB_MIN}",
-                   f"i.series_size_MB < {IDC_SIZE_MB_MAX}",
                    scout_filters]
     query = select_cols + ("WHERE " + " AND ".join(where_frags) + f"""
 ORDER BY CASE WHEN i.BodyPartExamined IN ({in_body}) THEN 0 ELSE 1 END,
-         random()
-LIMIT 40
+         i.series_size_MB ASC
+LIMIT 300
 """)
     rows = client.sql_query(query)
     rows = None if rows is None or len(rows) == 0 else rows
     if rows is None:
-        # Fallback query: if no rows could be fetched at all, retry ordered by
-        # ascending instance count (the SELECT subquery is known to work; this
-        # reorders so the next step can pick the smallest real series).
+        # Fallback query: same selection, but ordered by instance count so we
+        # expose only the smallest real series if the subquery-based ordering
+        # is not supported by the underlying engine.
         rows = client.sql_query(
             select_cols + ("WHERE " + " AND ".join(where_frags) + f"""
-ORDER BY n_instances ASC, random()
-LIMIT 40
+ORDER BY n_instances ASC, series_size_MB ASC
+LIMIT 300
 """))
         rows = None if rows is None or len(rows) == 0 else rows
     if rows is None:
@@ -691,46 +695,45 @@ LIMIT 40
             f"instances was found in IDC for this query.")
 
     records = rows.to_dict("records")
+
+    def _inst(r):
+        return int(r.get("n_instances") or 0)
+
+    def _size(r):
+        return float(r.get("series_size_MB") or 0)
+
+    def _pref(r):
+        body = (r.get("BodyPartExamined") or "").strip().upper()
+        return 0 if body in preferred else 1
+
+    # Only series with the requested minimum number of slices qualify. Sort by
+    # smallest size first (preferred body part as a tiebreaker) so the demo
+    # downloads fast and honors the chosen Slice count.
+    candidates = [r for r in records if _inst(r) >= min_instances]
+    candidates.sort(key=lambda r: (_size(r), _pref(r), _inst(r)))
+    if not candidates:
+        raise ValueError(
+            f"No public {modality} series with at least {min_instances} "
+            f"instances was found in IDC for this query.")
+
     infos = []
-    # In-band pass: strictly the preferred [min, max] instance window.
-    for r in records:
-        instances = int(r.get("n_instances") or 0)
-        if instances < min_instances or instances > IDC_MAX_INSTANCES:
-            continue
+    for r in candidates:
+        instances = _inst(r)
         infos.append({
             "series_uid": r["SeriesInstanceUID"],
             "collection_id": r.get("collection_id") or "",
             "series_description": r.get("SeriesDescription") or "",
             "body_part": r.get("BodyPartExamined") or "",
-            "size_mb": float(r.get("series_size_MB") or 0),
+            "size_mb": _size(r),
             "instances": instances,
-            "is_fallback": False,
+            # True when the pick falls outside the preferred "small demo
+            # series" band ([:8, 400] slices and <= IDC_SIZE_MB_MAX).
+            "is_fallback": (instances > IDC_MAX_INSTANCES
+                            or _size(r) > IDC_SIZE_MB_MAX),
         })
         if len(infos) >= limit:
-            return infos
-    if len(infos) > 0:
-        return infos
-    # Lenient pass: nothing in the preferred band. Take the smallest series
-    # we fetched that still has the required minimum number of instances, so
-    # the demo shows something instead of failing.
-    enough = [r for r in records
-              if int(r.get("n_instances") or 0) >= min_instances]
-    enough.sort(key=lambda r: int(r.get("n_instances") or 0))
-    if not enough:
-        raise ValueError(
-            f"No public {modality} series with at least {min_instances} "
-            f"instances was found in IDC for this query.")
-    r = enough[0]
-    infos.append({
-        "series_uid": r["SeriesInstanceUID"],
-        "collection_id": r.get("collection_id") or "",
-        "series_description": r.get("SeriesDescription") or "",
-        "body_part": r.get("BodyPartExamined") or "",
-        "size_mb": float(r.get("series_size_MB") or 0),
-        "instances": int(r.get("n_instances") or 0),
-        "is_fallback": True,
-    })
-    return infos[:limit]
+            break
+    return infos
 
 
 def _download_series_from_gcs(client, series_uid, dest_dir):
