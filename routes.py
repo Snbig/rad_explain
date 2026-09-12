@@ -57,9 +57,10 @@ def _build_messages(result, question=""):
     system_prompt = (
         "You are an expert radiologist explaining medical images to a "
         "non-specialist in plain language. Keep your answer SHORT and "
-        "concise, like a doctor's quick read of the study. Structure it "
-        "with exactly these three headings, each on its own line wrapped in "
-        "**bold**:\n\n"
+        "concise, like a doctor's quick read of the study.\n\n"
+        "ALWAYS include all three sections in this exact order as bold "
+        "headings, each on its own line. Never skip, rename, merge or "
+        "reorder them:\n\n"
         "**Findings**\n- up to 3 bullets naming only the most important "
         "findings (or simply 'Normal study' when there are none)\n\n"
         "**Impression**\n- one short sentence saying whether the study "
@@ -137,6 +138,91 @@ def _dedupe_repeated_sentences(text):
             seen.add(key)
         out.append(part + sep)
     return "".join(out).strip()
+
+
+# Canonical required report sections (in order) and the heading variants the
+# model sometimes produces instead. Normalized to the exact bold headings.
+_REQUIRED_HEADINGS = ("Findings", "Impression", "Recommendations")
+_HEADING_VARIANTS = [
+    (re.compile(r"\*\*\s*findings?\s*:\s*\*\*", re.I), "**Findings**"),
+    (re.compile(r"\*\*\s*finding\s*\*\*", re.I), "**Findings**"),
+    (re.compile(r"\*\*\s*key\s*findings\s*\*\*", re.I), "**Findings**"),
+    (re.compile(r"\*\*\s*impressions?\s*:\s*\*\*", re.I), "**Impression**"),
+    (re.compile(r"\*\*\s*impressions?\s*\*\*", re.I), "**Impression**"),
+    (re.compile(r"\*\*\s*overall\s*impression\s*\*\*", re.I), "**Impression**"),
+    (re.compile(r"\*\*\s*recommendations?\s*:\s*\*\*", re.I), "**Recommendations**"),
+    (re.compile(r"\*\*\s*recommendations?\s*\*\*", re.I), "**Recommendations**"),
+    (re.compile(r"\*\*\s*findings?\s*(?:and|&)\s*impressions?\s*\*\*", re.I),
+     "**Findings**\n**Impression**"),
+    (re.compile(r"\*\*\s*findings?\s*(?:and|&)\s*recommendations?\s*\*\*", re.I),
+     "**Findings**\n**Recommendations**"),
+]
+# Honest, non-diagnostic fallback line used only as a last resort when the
+# model refuses to add a missing section even after a rewrite request.
+_MISSING_SECTION_FALLBACK = {
+    "Findings": "**Findings**\n- No separate findings were listed by the model.",
+    "Impression": "**Impression**\n- An overall impression was not stated in the answer.",
+    "Recommendations": "**Recommendations**\n- No separate recommendations were given; "
+                      "follow up with the referring clinician if clinically needed.",
+}
+
+
+def _normalize_required_headings(text):
+    """Map heading variants to the canonical **bold** section names."""
+    for pattern, replacement in _HEADING_VARIANTS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _missing_required_headings(text):
+    lower = text.lower()
+    return [h for h in _REQUIRED_HEADINGS
+            if f"**{h.lower()}**" not in lower]
+
+
+def _ensure_three_sections(explanation, messages):
+    """Guarantee the answer always contains Findings / Impression /
+    Recommendations.
+
+    1. Normalize heading variants to the canonical bold headings.
+    2. If a section is still missing, one focused rewrite call asks the model
+       to add it (reusing the image context).
+    3. If the rewrite still omits it, append a neutral fallback line under the
+       missing heading so the UI never shows an answer without all three.
+    """
+    if not explanation:
+        return explanation
+    explanation = _normalize_required_headings(explanation)
+    missing = _missing_required_headings(explanation)
+    if not missing:
+        return explanation
+
+    logger.info("Final answer missing section(s) %s; requesting rewrite.",
+                missing)
+    try:
+        instruction = (
+            "Your previous answer is missing the section(s): "
+            + ", ".join(missing)
+            + ". Rewrite your COMPLETE answer so it contains all three "
+            "sections, in this order and with exactly these bold headings: "
+            "**Findings**, **Impression**, **Recommendations**. "
+            "Keep it short; do not add extra sections."
+        )
+        revised = _stream_explanation(messages + [
+            {"role": "assistant",
+             "content": [{"type": "text", "text": explanation}]},
+            {"role": "user",
+             "content": [{"type": "text", "text": instruction}]},
+        ], max_tokens=700)
+        revised = _normalize_required_headings(revised or explanation)
+        if not _missing_required_headings(revised):
+            return revised
+    except Exception as e:  # noqa: BLE001 - fallback below must not fail the request
+        logger.warning("Section rewrite failed: %s", e)
+
+    missing = _missing_required_headings(explanation)
+    return explanation + "\n\n" + "\n\n".join(
+        _MISSING_SECTION_FALLBACK[h] for h in missing)
 
 
 def _stream_explanation(messages, max_tokens=1536):
@@ -544,6 +630,7 @@ def upload_explain():
 
         messages = _build_messages(result, question)
         explanation = _stream_explanation(messages, max_tokens=700)
+        explanation = _ensure_three_sections(explanation, messages)
         if not explanation:
             logger.warning("Empty explanation from API for uploaded image.")
         return jsonify({
@@ -629,6 +716,7 @@ def idc_explain():
 
         messages = _build_messages(result, question)
         explanation = _stream_explanation(messages, max_tokens=700)
+        explanation = _ensure_three_sections(explanation, messages)
         if not explanation:
             logger.warning("Empty explanation from API for IDC sample.")
 
