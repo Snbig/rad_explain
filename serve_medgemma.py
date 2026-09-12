@@ -151,7 +151,7 @@ def chat_completions():
     try:
         messages = _normalize_messages(payload.get("messages", []))
         max_tokens = int(payload.get("max_tokens", 600))
-        max_new_tokens = max(1, min(max_tokens, 1024))
+        max_new_tokens = max(1, min(max_tokens, 1536))
         stream = bool(payload.get("stream", False))
     except (ValueError, KeyError) as e:
         return jsonify({"error": {"message": str(e)}}), 400

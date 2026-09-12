@@ -108,8 +108,14 @@ def _is_dicom_file(path):
     return suffix in {".dcm", ".dicom"}
 
 
-def parse_dicom_slice(dicom_path):
-    """Read a DICOM file and return (instance_number, modality, data_url_png)."""
+def parse_dicom_slice(dicom_path, max_frames=8):
+    """Read a DICOM file and return a list of windowed 2D slice dicts.
+
+    One entry per *visible frame*: single-frame DICOM yields one entry, while
+    multi-frame MRI/CT volumes (``pixel_array.ndim == 3``, e.g. Enhanced MR)
+    are sampled down to ``max_frames`` evenly-spaced frames so they fit the
+    MedGemma prompt and don't blow up memory.
+    """
     import pydicom
     from pydicom.errors import InvalidDicomError
 
@@ -131,11 +137,11 @@ def parse_dicom_slice(dicom_path):
     else:
         modality_name = "X-ray" if pixel_array.ndim == 2 else "CT"
 
-    # Apply DICOM rescale (e.g. HU for CT) before windowing.
+    # DICOM rescale (e.g. HU for CT) + window settings.
     slope = float(getattr(ds, "RescaleSlope", 1) or 1)
     intercept = float(getattr(ds, "RescaleIntercept", 0) or 0)
+    window_center, window_width = 40.0, 400.0
     if modality_name == "CT":
-        pixels = _to_hu(pixel_array, intercept, slope)
         center = getattr(ds, "WindowCenter", None)
         width = getattr(ds, "WindowWidth", None)
         try:
@@ -145,12 +151,30 @@ def parse_dicom_slice(dicom_path):
                 raise ValueError
         except (TypeError, ValueError):
             center, width = 40.0, 400.0
-        return {"instance": int(getattr(ds, "InstanceNumber", 0) or 0),
-                "modality": modality_name,
-                "pixels": _apply_ct_window(pixels, center, width)}
-    return {"instance": int(getattr(ds, "InstanceNumber", 0) or 0),
-            "modality": modality_name,
-            "pixels": _stretch_to_uint8(pixel_array)}
+        window_center, window_width = center, width
+
+    arr = np.asarray(pixel_array)
+    base_instance = int(getattr(ds, "InstanceNumber", 0) or 0)
+
+    if arr.ndim == 3 and arr.shape[-1] != 3:
+        frame_indices = np.unique(
+            np.round(np.linspace(0, arr.shape[0] - 1,
+                                 min(arr.shape[0], max_frames))).astype(int))
+        frames = [arr[i] for i in frame_indices]
+    else:
+        frames = [arr]
+
+    results = []
+    for offset, frame in enumerate(frames):
+        if modality_name == "CT":
+            pixels = _apply_ct_window(_to_hu(frame, intercept, slope),
+                                      window_center, window_width)
+        else:
+            pixels = _stretch_to_uint8(frame)
+        results.append({"instance": base_instance + offset,
+                        "modality": modality_name,
+                        "pixels": pixels})
+    return results
 
 
 def collect_dicom_files(paths):
@@ -212,7 +236,13 @@ def process_upload_dicom(paths, max_slices=MAX_PROMPT_IMAGES):
                        len(dicom_files))
     parsed = []
     for f in dicom_files:
-        parsed.append(parse_dicom_slice(f))
+        try:
+            parsed.extend(parse_dicom_slice(f))
+        except Exception as e:  # noqa: BLE001 - skip one bad file, keep the series
+            logger.warning("Skipping unreadable DICOM file %s: %s", f, e)
+    if not parsed:
+        raise ValueError("No readable DICOM slices found in the uploaded files.")
+    parsed.sort(key=lambda p: p["instance"])
     total = len(parsed)
     sliced = sample_slices(parsed, max_slices=max_slices)
     modalities = {p["modality"] for p in parsed}

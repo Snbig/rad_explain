@@ -6,3 +6,8 @@ requests
 numpy
 pydicom
 idc-index
+# DICOM pixel-data decompression for MRI (JPEG2000 / JPEG-LS / RLE / JPEG)
+pylibjpeg
+pylibjpeg-libjpeg
+pylibjpeg-openjpeg
+python-gdcm

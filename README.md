@@ -37,8 +37,11 @@ bundled demo cases:
   evenly sampled slice stack before being sent to the model.
 
 The analysis prompt asks the model to describe the key findings and whether
-the study appears normal or abnormal. An optional free-text question is added
-to the prompt verbatim.
+the study appears normal or abnormal. Explanations are returned as
+**Findings / Impression / Recommendations** sections (rendered as Markdown),
+and an optional free-text question is added to the prompt verbatim. MRI
+DICOM (including JPEG2000/JPEG-LS/RLE compression and multi-frame enhanced
+series) is supported via `pylibjpeg` + `python-gdcm` in `requirements.txt`.
 
 ## Analyze a public cancer sample from IDC
 

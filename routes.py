@@ -51,9 +51,19 @@ def _build_messages(result, question=""):
 
     system_prompt = (
         "You are an expert radiologist explaining medical images to a "
-        "non-specialist in simple, clear language. Be concise, describe what "
-        "is visible (or not), and clearly flag any uncertainty. This is for "
-        "educational purposes only and is not a diagnosis."
+        "non-specialist in plain language. Be thorough and detailed; do NOT "
+        "give a one-line summary. Structure your answer with AT LEAST these "
+        "three sections, using headings on their own lines wrapped in **bold**, "
+        "like this:\n\n"
+        "**Findings**\n- list each finding you observe (or state clearly that "
+        "the study looks normal), with simple explanations\n\n"
+        "**Impression**\n- one short paragraph giving the overall interpretation "
+        "and whether the study appears normal or abnormal\n\n"
+        "**Recommendations**\n- any suggested next steps, e.g. clinical "
+        "correlation, follow-up imaging, or comparison with prior studies\n\n"
+        "Use bullet points and short paragraphs; write enough detail to be "
+        "useful, and clearly flag any uncertainty. This is for educational "
+        "purposes only and is not a diagnosis."
     )
 
     if total_slices > 1:
@@ -87,7 +97,7 @@ def _build_messages(result, question=""):
     ]
 
 
-def _stream_explanation(messages, max_tokens=600):
+def _stream_explanation(messages, max_tokens=1536):
     """Send the multimodal messages and collect the streamed answer.
 
     Turns endpoint failures into LLMServiceError with the real reason (HTTP
@@ -421,7 +431,7 @@ def upload_explain():
         previews = result["previews"]
 
         messages = _build_messages(result, question)
-        explanation = _stream_explanation(messages, max_tokens=600)
+        explanation = _stream_explanation(messages, max_tokens=1536)
         if not explanation:
             logger.warning("Empty explanation from API for uploaded image.")
         return jsonify({
@@ -497,7 +507,7 @@ def idc_explain():
         total_slices = result["total_slices"]
 
         messages = _build_messages(result, question)
-        explanation = _stream_explanation(messages, max_tokens=600)
+        explanation = _stream_explanation(messages, max_tokens=1536)
         if not explanation:
             logger.warning("Empty explanation from API for IDC sample.")
 
