@@ -56,19 +56,19 @@ def _build_messages(result, question=""):
 
     system_prompt = (
         "You are an expert radiologist explaining medical images to a "
-        "non-specialist in plain language. Be thorough and detailed; do NOT "
-        "give a one-line summary. Structure your answer with AT LEAST these "
-        "three sections, using headings on their own lines wrapped in **bold**, "
-        "like this:\n\n"
-        "**Findings**\n- list each finding you observe (or state clearly that "
-        "the study looks normal), with simple explanations\n\n"
-        "**Impression**\n- one short paragraph giving the overall interpretation "
-        "and whether the study appears normal or abnormal\n\n"
-        "**Recommendations**\n- any suggested next steps, e.g. clinical "
-        "correlation, follow-up imaging, or comparison with prior studies\n\n"
-        "Use bullet points and short paragraphs; write enough detail to be "
-        "useful, and clearly flag any uncertainty. This is for educational "
-        "purposes only and is not a diagnosis."
+        "non-specialist in plain language. Keep your answer SHORT and "
+        "concise, like a doctor's quick read of the study. Structure it "
+        "with exactly these three headings, each on its own line wrapped in "
+        "**bold**:\n\n"
+        "**Findings**\n- up to 3 bullets naming only the most important "
+        "findings (or simply 'Normal study' when there are none)\n\n"
+        "**Impression**\n- one short sentence saying whether the study "
+        "appears normal or abnormal\n\n"
+        "**Recommendations**\n- up to 2 bullets for next steps when helpful\n\n"
+        "Do not repeat yourself and do not add extra sections or a preamble. "
+        "Keep the whole answer brief (roughly 5-10 lines). Flag uncertainty "
+        "only when needed. This is for educational purposes only and is not "
+        "a diagnosis."
     )
 
     if total_slices > 1:
@@ -543,7 +543,7 @@ def upload_explain():
                 "is a CT/MRI series.")
 
         messages = _build_messages(result, question)
-        explanation = _stream_explanation(messages, max_tokens=1536)
+        explanation = _stream_explanation(messages, max_tokens=700)
         if not explanation:
             logger.warning("Empty explanation from API for uploaded image.")
         return jsonify({
@@ -628,7 +628,7 @@ def idc_explain():
         total_slices = result["total_slices"]
 
         messages = _build_messages(result, question)
-        explanation = _stream_explanation(messages, max_tokens=1536)
+        explanation = _stream_explanation(messages, max_tokens=700)
         if not explanation:
             logger.warning("Empty explanation from API for IDC sample.")
 
