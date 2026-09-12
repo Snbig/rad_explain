@@ -169,7 +169,7 @@ _IDC_POOL = {}
 _IDC_POOL_LOCK = threading.Lock()
 _IDC_POOL_ROOT = Path(tempfile.gettempdir()) / "radexplain-idc-pool"
 # How many samples to stage per modality when fetching the pool.
-IDC_POOL_COUNT = {"X-ray": 3, "CT": 4, "MRI": 3}
+IDC_POOL_COUNT = {"X-ray": 5, "CT": 5, "MRI": 5}
 
 
 def _idc_pool_summary():
@@ -196,7 +196,7 @@ def _clean_pool_dirs(keep_dirs):
 
 @main_bp.route('/idc_fetch_samples', methods=['POST'])
 def idc_fetch_samples():
-    """Stage ~10 public IDC samples (mixed modalities) for instant analysis."""
+    """Stage ~15 public IDC samples (5 per modality) for instant analysis."""
     collected = {}
     for modality, count in IDC_POOL_COUNT.items():
         try:
@@ -553,10 +553,11 @@ def idc_explain():
     question = (data.get('question') or '').strip()
     sample = _pick_pooled_sample(modality)
 
-    # Match the high-dimensional CT notebook's T4 tuning (MAX_SLICE=2 /
-    # MAX_PROMPT_IMAGES=2): the image prefill is what OOMs a 16 GB GPU at
-    # generation time, not the response length. Fewer slices = safe on Colab.
-    max_slices = 2
+    max_slices = 8
+    try:
+        max_slices = min(max(int(data.get('max_slices') or 8), 1), 30)
+    except ValueError:
+        max_slices = 8
 
     tmp_root = Path(tempfile.mkdtemp(prefix="radexplain-idc-"))
     try:
@@ -587,15 +588,11 @@ def idc_explain():
         if not explanation:
             logger.warning("Empty explanation from API for IDC sample.")
 
-        # For staged samples show the full (up-to-6-slice) previews while the
-        # prompt itself stays capped at max_slices.
-        display_previews = (sample["previews"] if sample is not None
-                            else previews)
         return jsonify({
             "modality": modality,
             "total_slices": total_slices,
             "prompt_slices": len(previews),
-            "previews": display_previews,
+            "previews": previews,
             "explanation": explanation or
                            "No explanation content received from the API.",
             "collection": info["collection_id"],

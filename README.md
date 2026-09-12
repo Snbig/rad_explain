@@ -51,18 +51,16 @@ small *real* public cancer imaging series from the NCI [Imaging Data Commons
 same pipeline — no files needed. Uses `idc-index` to pick a compact series
 (≤ 80 MB, ≤ 60 instances, body-part aware) and download its DICOM files.
 
-For instant results (no per-click download), the **"Fetch 10 samples from IDC"**
-button stages 3 X-ray + 4 CT + 3 MRI series up front; the X-Ray/CT/MRI buttons
+For instant results (no per-click download), the **"Fetch 15 samples from IDC"**
+button stages 5 X-ray + 5 CT + 5 MRI series up front; the X-Ray/CT/MRI buttons
 then pick a **random** staged sample, falling back to a live download if the
 pool is empty.
 
-The sample is down-sampled to **2 prompt slices** to stay within a 16 GB T4 at
-4-bit quantization — matching the `high_dimensional_ct` notebook's tuning
-(image prefill, not response length, is what OOMs the GPU at generation time).
-
-On your own uploads the UI's **Slices** control samples 1–30 DICOM slices into
-the prompt (default 8). Higher counts give the model more context but raise GPU
-memory: lower it if you hit CUDA OOM.
+The UI's **Slices** control samples 1–30 DICOM slices into the prompt (default
+8) for both your own uploads and the IDC samples. Higher counts give the model
+more context but raise GPU memory: on a 16 GB T4 keep it low (image prefill, not
+response length, is what OOMs the GPU at generation time) — lower it if you hit
+CUDA OOM.
 
 Clicking any sentence or bullet of a generated explanation opens a
 plain-language explanation of that sentence (the same interaction the demo's

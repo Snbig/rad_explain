@@ -387,6 +387,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function clampSlices(value) {
+        return Math.max(1, Math.min(parseInt(value, 10) || 8, 30));
+    }
+
     async function handleUploadAnalyze() {
         if (!uploadFilesInput || !uploadFilesInput.files || uploadFilesInput.files.length === 0) {
             displayUploadError('Please select at least one file to upload.');
@@ -411,8 +415,7 @@ document.addEventListener('DOMContentLoaded', () => {
             formData.append('modality', uploadModality.value);
         }
         if (uploadSlices && uploadSlices.value) {
-            const n = Math.max(1, Math.min(parseInt(uploadSlices.value, 10) || 8, 30));
-            formData.append('max_slices', n);
+            formData.append('max_slices', clampSlices(uploadSlices.value));
         }
         if (uploadQuestion && uploadQuestion.value.trim()) {
             formData.append('question', uploadQuestion.value.trim());
@@ -459,11 +462,12 @@ document.addEventListener('DOMContentLoaded', () => {
         idcButtons.forEach(b => { b.disabled = true; });
 
         const poolCounts = currentPoolCounts;
+        const idcSlices = clampSlices(uploadSlices && uploadSlices.value);
         if (uploadStatus) {
             uploadStatus.textContent =
                 (poolCounts && poolCounts[modality])
-                    ? `Analyzing a random ${modality} sample from the pre-fetched pool...`
-                    : `Fetching a public ${modality} cancer sample from IDC... This can take a minute.`;
+                    ? `Analyzing a random ${modality} sample (${idcSlices} slices) from the pre-fetched pool...`
+                    : `Fetching a public ${modality} cancer sample from IDC and analyzing (${idcSlices} slices)... This can take a minute.`;
             uploadStatus.style.display = 'block';
         }
 
@@ -475,7 +479,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const response = await fetch('/idc_explain', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ modality, question: (uploadQuestion && uploadQuestion.value.trim()) || '' }),
+                    body: JSON.stringify({
+                        modality,
+                        max_slices: idcSlices,
+                        question: (uploadQuestion && uploadQuestion.value.trim()) || ''
+                    }),
                     signal: controller.signal
                 });
                 const payload = await response.json().catch(() => ({}));
@@ -536,7 +544,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (uploadStatus) {
             uploadStatus.textContent =
-                'Fetching 10 public IDC samples (3 X-ray, 4 CT, 3 MRI)... This can take a few minutes.';
+                'Fetching 15 public IDC samples (5 X-ray, 5 CT, 5 MRI)... This can take a few minutes.';
             uploadStatus.style.display = 'block';
         }
 
@@ -563,7 +571,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 .join(' · ');
             const message = `Staged **${data.samples ?? 0}** IDC samples.\n` +
                 `_${parts}_\n\n` +
-                `Now click **X-Ray**, **CT** or **MRI** to analyze a random sample instantly ` +
+                `Now click **X-Ray**, **CT** or **MRI** to analyze a random sample ` +
+                `with the current **Slices** value (${clampSlices(uploadSlices && uploadSlices.value)}) ` +
                 `(click any response sentence to see it explained in plainer terms).`;
             if (uploadResult) {
                 renderMarkdown(uploadResult, message);
