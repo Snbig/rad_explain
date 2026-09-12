@@ -57,10 +57,13 @@ then pick a **random** staged sample, falling back to a live download if the
 pool is empty.
 
 The UI's **Slices** control samples 1–30 DICOM slices into the prompt (default
-8) for both your own uploads and the IDC samples. Higher counts give the model
-more context but raise GPU memory: on a 16 GB T4 keep it low (image prefill, not
-response length, is what OOMs the GPU at generation time) — lower it if you hit
-CUDA OOM.
+8) for both your own uploads and the IDC samples. Slice images are down-scaled
+to ≤ 384 px before encoding (override with `MEDGEMMA_IMAGE_SIDE`), which caps
+the SigLIP image-token prefill — the real OOM driver on a 16 GB T4. The local
+`serve_medgemma.py` also (a) flushes the CUDA cache after every request so a new
+sample never inherits GPU memory from the previous one, and (b) rejects prompts
+above ~9 000 image tokens with a clear message instead of a 503. If you still
+hit OOM, lower **Slices** or set `MEDGEMMA_IMAGE_SIDE=256`.
 
 Clicking any sentence or bullet of a generated explanation opens a
 plain-language explanation of that sentence (the same interaction the demo's

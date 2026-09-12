@@ -28,6 +28,7 @@ Run standalone::
     pip install -r requirements.txt
     HF_TOKEN=<your-token> python serve_medgemma.py
 """
+import gc
 import json
 import logging
 import os
@@ -40,6 +41,10 @@ from flask import Flask, Response, jsonify, request
 logger = logging.getLogger("medgemma_server")
 
 MODEL_ID = "google/medgemma-1.5-4b-it"
+
+# Reject prompts whose estimated SigLIP image-token count exceeds this: past
+# this the image prefill reliably OOMs a 16 GB T4 (see _estimate_image_tokens).
+MAX_PREFILL_IMAGE_TOKENS = int(os.environ.get("MEDGEMMA_MAX_PREFILL_TOKENS", "9000"))
 
 _processor = None
 _model = None
@@ -106,34 +111,79 @@ def _normalize_messages(chat_messages):
     return out
 
 
+def _estimate_image_tokens(chat_messages):
+    """Approximate SigLIP tokens the image prefill will consume (~(side/14)^2/image)."""
+    total = 0
+    for m in chat_messages:
+        for item in (m.get("content") or []):
+            if item.get("type") == "image":
+                src = item.get("image") or ""
+                total += 1 if "data:image/png" in src else 0
+    if total == 0:
+        return 0
+    import base64
+    import io
+    try:
+        img = next(
+            item["image"]
+            for m in chat_messages for item in (m.get("content") or [])
+            if item.get("type") == "image" and "data:image/png" in item.get("image", "")
+        )
+        from PIL import Image
+        w, h = Image.open(io.BytesIO(base64.b64decode(img.split(",", 1)[1]))).size
+        per_img = ((w // 14) + 1) * ((h // 14) + 1)
+    except Exception:  # noqa: BLE001 - best-effort estimate
+        per_img = 950
+    return total * per_img
+
+
 def generate(messages, max_new_tokens=600):
     """Tokenize image/text content and generate a response (deterministic).
 
     Mirrors the official high-dimensional CT notebook path exactly (including
     ``continue_final_message=False``): apply_chat_template -> generate ->
     post_process_image_text_to_text, stripping any echoed prompt prefix.
+
+    Every request frees its input/generated tensors and empties the CUDA
+    cache in a ``finally`` block, so the GPU never carries memory from a
+    previous sample into the next one.
     """
     import time
 
     with _lock:
         start = time.time()
-        with torch.inference_mode():
-            inputs = _processor.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                continue_final_message=False,
-                return_tensors="pt",
-                tokenize=True,
-                return_dict=True,
-            )
-            inputs = inputs.to(_model.device, dtype=torch.bfloat16)
+        inputs = None
+        generated_sequence = None
+        try:
+            with torch.inference_mode():
+                inputs = _processor.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    continue_final_message=False,
+                    return_tensors="pt",
+                    tokenize=True,
+                    return_dict=True,
+                )
+                _est = _estimate_image_tokens(messages)
+                logger.info("prefill: %d slice images (~%d image tokens)",
+                            sum(1 for m in messages
+                                for it in (m.get("content") or [])
+                                if it.get("type") == "image"), _est)
+                inputs = inputs.to(_model.device, dtype=torch.bfloat16)
+                torch.cuda.empty_cache()
+                generated_sequence = _model.generate(
+                    **inputs, do_sample=False, max_new_tokens=max_new_tokens)
+            response = _processor.post_process_image_text_to_text(
+                generated_sequence, skip_special_tokens=True)[0]
+            decoded_inputs = _processor.post_process_image_text_to_text(
+                inputs["input_ids"], skip_special_tokens=True)[0]
+        finally:
+            # Release this request's GPU tensors so the next sample starts
+            # from a clean slate (KV caches die with the forward pass, but
+            # fragmentation can linger without an explicit empty_cache).
+            del inputs, generated_sequence
+            gc.collect()
             torch.cuda.empty_cache()
-            generated_sequence = _model.generate(
-                **inputs, do_sample=False, max_new_tokens=max_new_tokens)
-        response = _processor.post_process_image_text_to_text(
-            generated_sequence, skip_special_tokens=True)[0]
-    decoded_inputs = _processor.post_process_image_text_to_text(
-        inputs["input_ids"], skip_special_tokens=True)[0]
     index = response.find(decoded_inputs)
     if 0 <= index <= 2:
         response = response[index + len(decoded_inputs):]
@@ -156,6 +206,17 @@ def chat_completions():
     except (ValueError, KeyError) as e:
         return jsonify({"error": {"message": str(e)}}), 400
 
+    # Guard against a prefill so big it is guaranteed to OOM the GPU: a clear
+    # 413 beats a 503/torch OOM after minutes of vision encoding.
+    est_tokens = _estimate_image_tokens(messages)
+    if est_tokens > MAX_PREFILL_IMAGE_TOKENS:
+        logger.warning("Rejecting prompt: ~%d image tokens > %d allowed",
+                       est_tokens, MAX_PREFILL_IMAGE_TOKENS)
+        return jsonify({"error": {
+            "message": (f"The prompt encodes ~{est_tokens:,} image tokens "
+                        "which exceeds this GPU. Lower the Slices value "
+                        "(or set MEDGEMMA_IMAGE_SIDE=256) and retry.")}}), 413
+
     try:
         text = generate(messages, max_new_tokens=max_new_tokens)
     except torch.cuda.OutOfMemoryError as e:
@@ -163,7 +224,8 @@ def chat_completions():
         logger.exception("CUDA OOM during generation")
         return jsonify({"error": {
             "message": ("CUDA out of memory during generation. "
-                        "Upload fewer slices / lower resolution.")}}), 503
+                        "Lower the Slices value (e.g. 2-4) or set "
+                        "MEDGEMMA_IMAGE_SIDE=256 and restart.")}}), 503
     except Exception as e:  # noqa: BLE001
         logger.exception("Generation failed")
         return jsonify({"error": {"message": str(e)}}), 500

@@ -24,6 +24,7 @@ working even when only the plain-image path is used.
 import base64
 import io
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,15 @@ MODALITY_XRAY = {"CR", "DX", "XC", "RF", "MG"}
 MODALITY_CT = {"CT"}
 MODALITY_MRI = {"MR"}
 MAX_PROMPT_IMAGES = 30  # Max slice images allowed in the prompt (UI clamps to this too).
+
+
+def _max_slice_image_side():
+    val = os.environ.get("MEDGEMMA_IMAGE_SIDE", "384")
+    try:
+        val = int(val)
+    except ValueError:
+        return 384
+    return val if val > 0 else None
 
 # User-friendly modality label -> DICOM Modality tag values.
 IDC_MODALITY_TAGS = {
@@ -72,12 +82,22 @@ IDC_MIN_INSTANCES = {"X-ray": 1, "CT": 8, "MRI": 1}
 
 
 def array_to_png_data_url(pixels):
-    """Encode a 2D uint8 numpy array as a PNG data URL."""
+    """Encode a 2D uint8 numpy array as a PNG data URL.
+
+    Slice images are down-scaled to at most ``MAX_SLICE_IMAGE_SIDE`` pixels on
+    the longest side before encoding. That caps the number of SigLIP image
+    tokens per slice (~4x fewer at 384 px vs 512 px), which is what keeps the
+    image prefill from out-of-memorying a 16 GB T4 when several slices are
+    sent at once. Override with MEDGEMMA_IMAGE_SIDE.
+    """
     if pixels.ndim == 3 and pixels.shape[2] == 3:
         arr = pixels
     else:
         arr = np.stack([pixels] * 3, axis=-1)
     img = Image.fromarray(arr)
+    side = _max_slice_image_side()
+    if side is not None and max(img.size) > side:
+        img.thumbnail((side, side), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
