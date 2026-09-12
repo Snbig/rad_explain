@@ -48,6 +48,19 @@ Variables and Secrets). `MEDGEMMA_ENDPOINT_URL` should point at a MedGemma
 chat-completions endpoint (e.g. a Hugging Face Inference Endpoint or an
 OpenAI-compatible v1/chat/completions route).
 
+## Run it on Colab (no Space / no endpoint needed)
+
+`notebooks/rad_explain_colab.ipynb` runs the whole demo inside one Colab GPU
+runtime. It starts `serve_medgemma.py` (a tiny local OpenAI-compatible
+`/v1/chat/completions` server that runs MedGemma 1.5 in 4-bit on the T4) on
+port 7861 and the Flask app itself on port 7860, then embeds the app as an
+iframe. Nothing is uploaded anywhere — the images you upload are processed on
+this runtime only.
+
+To run it standalone: `pip install -r requirements.txt` then
+`HF_TOKEN=<token> python serve_medgemma.py` (disable 4-bit with
+`LOAD_IN_4BIT=0` on a 24 GB+ GPU).
+
 # Links
 * MedGemma HuggingFace - https://huggingface.co/collections/google/medgemma-release-680aade845f90bec6a3f60c4
 * MedGemma DevSite - https://developers.google.com/health-ai-developer-foundations/medgemma
