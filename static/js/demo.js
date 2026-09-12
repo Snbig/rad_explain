@@ -48,6 +48,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const uploadResult = document.getElementById('upload-result');
     let currentMode = 'report';
 
+    function renderMarkdown(el, text) {
+        if (!el) return;
+        if (window.marked && typeof window.marked.parse === 'function') {
+            el.innerHTML = window.marked.parse(text || '', { breaks: true, gfm: true });
+        } else {
+            el.textContent = text || '';
+        }
+    }
+
     function setMode(mode) {
         currentMode = mode;
         const uploadTabButton = caseSelectorTabsContainer?.querySelector('[data-upload-tab]');
@@ -129,6 +138,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (uploadAnalyzeButton) {
             uploadAnalyzeButton.addEventListener('click', handleUploadAnalyze);
         }
+
+        // --- IDC sample mode wiring ---
+        document.querySelectorAll('.idc-button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const modality = btn.dataset.idcModality;
+                if (modality) handleIdcSample(modality);
+            });
+        });
 
         reportTextDisplay.addEventListener('click', handleSentenceClick);
 
@@ -345,7 +362,7 @@ document.addEventListener('DOMContentLoaded', () => {
         explanationLoadingTimer = null;
             explanationOutput.classList.remove('loading');
             requestAnimationFrame(() => {
-                explanationContent.textContent = data.explanation || "No explanation content received.";
+                renderMarkdown(explanationContent, data.explanation || "No explanation content received.");
                 adjustExplanationPosition();
             });
         } catch (error) {
@@ -366,7 +383,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         abortOngoingRequests();
         if (uploadError) uploadError.style.display = 'none';
-        if (uploadResult) uploadResult.textContent = '';
+        if (uploadResult) uploadResult.innerHTML = '';
         if (uploadPreviewGrid) uploadPreviewGrid.innerHTML = '';
         if (uploadStatus) {
             uploadStatus.textContent = 'Analyzing... The model endpoint may need to warm up for a few minutes if it was idle.';
@@ -401,7 +418,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 : `${modalityLabel} · single image`;
 
             if (uploadResult) {
-                uploadResult.textContent = `${meta}\n\n${data.explanation || ''}`;
+                renderMarkdown(uploadResult, `${meta}\n\n${data.explanation || ''}`);
             }
             if (data.previews && data.previews.length && uploadPreviewGrid) {
                 renderPreviewGrid(data.previews);
@@ -411,6 +428,69 @@ document.addEventListener('DOMContentLoaded', () => {
             displayUploadError(`Upload Error: ${error.message}`);
         } finally {
             if (uploadAnalyzeButton) uploadAnalyzeButton.disabled = false;
+        }
+    }
+
+    async function handleIdcSample(modality) {
+        abortOngoingRequests();
+        if (uploadError) uploadError.style.display = 'none';
+        if (uploadResult) uploadResult.innerHTML = '';
+        if (uploadPreviewGrid) uploadPreviewGrid.innerHTML = '';
+
+        const idcButtons = document.querySelectorAll('.idc-button');
+        idcButtons.forEach(b => { b.disabled = true; });
+
+        if (uploadStatus) {
+            uploadStatus.textContent =
+                `Fetching a public ${modality} cancer sample from IDC... This can take a minute.`;
+            uploadStatus.style.display = 'block';
+        }
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 300000);
+
+        try {
+            const data = await (async () => {
+                const response = await fetch('/idc_explain', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ modality, question: (uploadQuestion && uploadQuestion.value.trim()) || '' }),
+                    signal: controller.signal
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload.error || `HTTP error ${response.status}`);
+                }
+                return payload;
+            })();
+
+            if (uploadStatus) uploadStatus.style.display = 'none';
+
+            const modalityLabels = { 'X-ray': 'Chest X-Ray', 'CT': 'CT', 'MRI': 'MRI' };
+            const modalityLabel = modalityLabels[data.modality] || data.modality || 'Image';
+            const meta = data.total_slices > 1
+                ? `${modalityLabel} · ${data.total_slices} slices in series (using ${data.prompt_slices})`
+                : `${modalityLabel} · single image`;
+            const sourceLine = [data.source, data.body_part]
+                .filter(Boolean)
+                .join(' · ');
+            const header = `**${meta}**` + (sourceLine ? `\n*Source: ${sourceLine}*` : '');
+
+            if (uploadResult) {
+                renderMarkdown(uploadResult, `${header}\n\n${data.explanation || ''}`);
+            }
+            if (data.previews && data.previews.length && uploadPreviewGrid) {
+                renderPreviewGrid(data.previews);
+            }
+        } catch (error) {
+            if (uploadStatus) uploadStatus.style.display = 'none';
+            const message = (error.name === 'AbortError')
+                ? 'The IDC sample request timed out. Please try again.'
+                : error.message;
+            displayUploadError(`IDC Sample Error: ${message}`);
+        } finally {
+            clearTimeout(timeout);
+            idcButtons.forEach(b => { b.disabled = false; });
         }
     }
 

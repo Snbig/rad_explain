@@ -33,6 +33,89 @@ main_bp = Blueprint('main', __name__)
 
 # LLM client is initialized in app.py create_app()
 
+
+def _build_messages(result, question=""):
+    """Build the multimodal MedGemma message list from processed previews."""
+    modality = result["modality"]
+    total_slices = result["total_slices"]
+    previews = result["previews"]
+
+    system_prompt = (
+        "You are an expert radiologist explaining medical images to a "
+        "non-specialist in simple, clear language. Be concise, describe what "
+        "is visible (or not), and clearly flag any uncertainty. This is for "
+        "educational purposes only and is not a diagnosis."
+    )
+
+    if total_slices > 1:
+        instruction = (
+            f"You are reviewing a {modality} series with {total_slices} "
+            "slices. The evenly-sampled slices below represent the volume. "
+            "Review them as a radiologist would a full study"
+        )
+        content = [{"type": "text", "text": instruction}]
+        for prev in previews:
+            content.append({"type": "image", "image": prev["data_url"]})
+            content.append({"type": "text", "text": f"SLICE {prev['label']}"})
+    else:
+        instruction = f"You are reviewing a {modality} image."
+        content = [{"type": "text", "text": instruction},
+                   {"type": "image", "image": previews[0]["data_url"]}]
+
+    if question:
+        content.append({"type": "text",
+                        "text": f"Question from the user: {question}"})
+    else:
+        content.append({"type": "text",
+                        "text": ("Describe the most important findings in "
+                                 "simple terms and state whether the study "
+                                 "appears normal or abnormal.")})
+
+    return [
+        {"role": "system",
+         "content": [{"type": "text", "text": system_prompt}]},
+        {"role": "user", "content": content},
+    ]
+
+
+def _stream_explanation(messages, max_tokens=600):
+    """Send the multimodal messages and collect the streamed answer."""
+    logger.info("Sending (uploaded / IDC sample) request to LLM API (REST)...")
+    response = make_chat_completion_request(
+        model="tgi",
+        messages=messages,
+        top_p=None,
+        temperature=0,
+        max_tokens=max_tokens,
+        stream=True,
+        seed=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+    )
+    explanation_parts = []
+    for line in response.iter_lines():
+        if not line:
+            continue
+        decoded_line = line.decode('utf-8')
+        if decoded_line.startswith('data: '):
+            json_data_str = decoded_line[len('data: '):].strip()
+            if json_data_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(json_data_str)
+                if (chunk.get("choices") and
+                        chunk["choices"][0].get("delta") and
+                        chunk["choices"][0]["delta"].get("content")):
+                    explanation_parts.append(
+                        chunk["choices"][0]["delta"]["content"])
+            except json.JSONDecodeError:
+                logger.warning(
+                    f"Could not decode JSON from stream chunk: {json_data_str}")
+        elif decoded_line.strip() == "[DONE]":
+            break
+    return "".join(explanation_parts).strip()
+
 # --- Serve the cache directory as a zip file ---
 @main_bp.route('/download_cache')
 def download_cache_zip():
@@ -307,82 +390,8 @@ def upload_explain():
         total_slices = result["total_slices"]
         previews = result["previews"]
 
-        system_prompt = (
-            "You are an expert radiologist explaining medical images to a "
-            "non-specialist in simple, clear language. Be concise, describe what "
-            "is visible (or not), and clearly flag any uncertainty. This is for "
-            "educational purposes only and is not a diagnosis."
-        )
-
-        if total_slices > 1:
-            instruction = (
-                f"You are reviewing a {modality} series with {total_slices} "
-                "slices. The evenly-sampled slices below represent the volume. "
-                "Review them as a radiologist would a full study"
-            )
-            content = [{"type": "text", "text": instruction}]
-            for prev in previews:
-                content.append({"type": "image", "image": prev["data_url"]})
-                content.append({"type": "text", "text": f"SLICE {prev['label']}"})
-        else:
-            instruction = (
-                f"You are reviewing a {modality} image."
-            )
-            content = [{"type": "text", "text": instruction},
-                       {"type": "image", "image": previews[0]["data_url"]}]
-
-        if question:
-            content.append({"type": "text",
-                            "text": f"Question from the user: {question}"})
-        else:
-            content.append({"type": "text",
-                            "text": ("Describe the most important findings in "
-                                     "simple terms and state whether the study "
-                                     "appears normal or abnormal.")})
-
-        messages = [
-            {"role": "system",
-             "content": [{"type": "text", "text": system_prompt}]},
-            {"role": "user", "content": content},
-        ]
-
-        logger.info("Sending uploaded image request to LLM API (REST)...")
-        response = make_chat_completion_request(
-            model="tgi",
-            messages=messages,
-            top_p=None,
-            temperature=0,
-            max_tokens=600,
-            stream=True,
-            seed=None,
-            stop=None,
-            frequency_penalty=None,
-            presence_penalty=None
-        )
-
-        explanation_parts = []
-        for line in response.iter_lines():
-            if not line:
-                continue
-            decoded_line = line.decode('utf-8')
-            if decoded_line.startswith('data: '):
-                json_data_str = decoded_line[len('data: '):].strip()
-                if json_data_str == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(json_data_str)
-                    if (chunk.get("choices") and
-                            chunk["choices"][0].get("delta") and
-                            chunk["choices"][0]["delta"].get("content")):
-                        explanation_parts.append(
-                            chunk["choices"][0]["delta"]["content"])
-                except json.JSONDecodeError:
-                    logger.warning(
-                        f"Could not decode JSON from stream chunk: {json_data_str}")
-            elif decoded_line.strip() == "[DONE]":
-                break
-
-        explanation = "".join(explanation_parts).strip()
+        messages = _build_messages(result, question)
+        explanation = _stream_explanation(messages, max_tokens=600)
         if not explanation:
             logger.warning("Empty explanation from API for uploaded image.")
         return jsonify({
@@ -405,5 +414,69 @@ def upload_explain():
     except Exception as e:  # noqa: BLE001
         logger.error(f"Unexpected error handling upload: {e}", exc_info=True)
         return jsonify({"error": f"Unexpected error processing upload: {e}"}), 500
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+@main_bp.route('/idc_explain', methods=['POST'])
+def idc_explain():
+    """Explains a public X-ray / CT / MRI cancer sample from IDC.
+
+    Selects one small public cancer series from the NCI Imaging Data Commons
+    for the requested modality, downloads it, and runs it through the same
+    DICOM -> slice previews -> MedGemma pipeline as /upload_explain.
+    """
+    import shutil
+    import tempfile
+
+    if not llm_is_initialized():
+        logger.error("LLM client (REST API) not initialized. Cannot process IDC sample.")
+        return jsonify({"error": "LLM client (REST API) not initialized. Check API key and base URL."}), 500
+
+    data = request.get_json(silent=True) or {}
+    modality = (data.get('modality') or '').strip()
+    if modality not in ('X-ray', 'CT', 'MRI'):
+        return jsonify({"error": "modality must be one of: X-ray, CT, MRI."}), 400
+
+    question = (data.get('question') or '').strip()
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="radexplain-idc-"))
+    try:
+        info, files = imaging.fetch_idc_sample(modality, dest_dir=tmp_root)
+        result = imaging.process_upload_dicom(files, max_slices=8)
+        result["modality"] = modality
+        previews = result["previews"]
+        total_slices = result["total_slices"]
+
+        messages = _build_messages(result, question)
+        explanation = _stream_explanation(messages, max_tokens=600)
+        if not explanation:
+            logger.warning("Empty explanation from API for IDC sample.")
+
+        return jsonify({
+            "modality": modality,
+            "total_slices": total_slices,
+            "prompt_slices": len(previews),
+            "previews": previews,
+            "explanation": explanation or
+                           "No explanation content received from the API.",
+            "collection": info["collection_id"],
+            "body_part": info["body_part"],
+            "series": info["series_description"],
+            "source": f"IDC · {info['collection_id']}"
+                       f" (n={info['instances']}, {info['size_mb']:.0f} MB)",
+        })
+    except ValueError as e:
+        logger.warning(f"Invalid IDC sample request: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 400
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error during LLM API call for IDC sample: {e}", exc_info=True)
+        return jsonify({"error": ("Failed to generate explanation. The service "
+                                  "might be temporarily unavailable and is now "
+                                  "likely starting up. Please try again in a few "
+                                  "moments.")}), 500
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Unexpected error handling IDC sample: {e}", exc_info=True)
+        return jsonify({"error": f"Unexpected error fetching IDC sample: {e}"}), 500
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)

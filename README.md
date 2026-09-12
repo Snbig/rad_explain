@@ -40,6 +40,14 @@ The analysis prompt asks the model to describe the key findings and whether
 the study appears normal or abnormal. An optional free-text question is added
 to the prompt verbatim.
 
+## Analyze a public cancer sample from IDC
+
+The Upload tab also offers **X-Ray / CT / MRI** sample buttons that pull one
+small *real* public cancer imaging series from the NCI [Imaging Data Commons
+(IDC)](https://portal.imaging.datacommons.cancer.gov/) and run it through the
+same pipeline — no files needed. Uses `idc-index` to pick a compact series
+(≤ 80 MB, ≤ 60 instances, body-part aware) and download its DICOM files.
+
 **Note:** This space uses a HuggingFace endpoint that may scale down to zero due to inactivity. If this occurs, please allow approximately 10 minutes for the endpoint to restart. As an alternative, the model can be deployed on ModelGarden (see the link below).
 
 **Note for self-hosting this fork:** the app requires the `HF_TOKEN` and

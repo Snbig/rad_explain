@@ -27,6 +27,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
+import requests
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,26 @@ MODALITY_XRAY = {"CR", "DX", "XC", "RF", "MG"}
 MODALITY_CT = {"CT"}
 MODALITY_MRI = {"MR"}
 MAX_PROMPT_IMAGES = 8  # Cap the number of slice images encoded in the prompt.
+
+# User-friendly modality label -> DICOM Modality tag values.
+IDC_MODALITY_TAGS = {
+    "X-ray": MODALITY_XRAY,
+    "CT": MODALITY_CT,
+    "MRI": MODALITY_MRI,
+}
+
+# Body parts we prefer per modality so the sample is a meaningful cancer
+# study. Non-matching body parts are still accepted as a fallback.
+IDC_PREFERRED_BODY_PART = {
+    "X-ray": ("CHEST",),
+    "CT": ("CHEST", "ABDOMEN", "PELVIS", "BRAIN"),
+    "MRI": ("BRAIN", "BREAST", "PROSTATE"),
+}
+
+# Keep downloaded / sampled series small enough for the 4-bit 16 GB Colab GPU.
+IDC_MAX_INSTANCES = 60
+IDC_SIZE_MB_MIN = 1
+IDC_SIZE_MB_MAX = 80
 
 
 def array_to_png_data_url(pixels):
@@ -203,3 +224,143 @@ def process_upload_dicom(paths, max_slices=MAX_PROMPT_IMAGES):
         previews.append({"label": f"Slice {i}/{total}", "data_url": data_url})
     return {"modality": modality, "total_slices": total,
             "prompt_slices": len(previews), "previews": previews}
+
+
+# --- NCI Imaging Data Commons (IDC) sample fetching ------------------------
+
+def search_idc_series(modality, preferred_body_parts=None):
+    """Pick one small public cancer series for *modality* ('X-ray', 'CT', 'MRI').
+
+    Uses the `idc-index` package (lazily imported) to query the ~100 TB of
+    public cancer imaging data harmonized by the NCI Imaging Data Commons into
+    DICOM. Returns metadata for a series with few instances / small size so it
+    downloads quickly and fits the MedGemma prompt.
+    """
+    if modality not in IDC_MODALITY_TAGS:
+        raise ValueError(
+            f"Unknown modality '{modality}'. Use X-ray, CT or MRI.")
+    modality_tags = IDC_MODALITY_TAGS[modality]
+    preferred = preferred_body_parts or IDC_PREFERRED_BODY_PART[modality]
+
+    from idc_index import IDCClient
+    client = IDCClient.client()
+
+    in_mods = ", ".join(f"'{m}'" for m in modality_tags)
+    in_body = ", ".join(f"'{b}'" for b in preferred)
+    query = f"""
+SELECT i.SeriesInstanceUID AS SeriesInstanceUID,
+       i.collection_id AS collection_id,
+       i.SeriesDescription AS SeriesDescription,
+       i.BodyPartExamined AS BodyPartExamined,
+       i.series_size_MB AS series_size_MB,
+       (SELECT count(*) FROM index b
+        WHERE b.SeriesInstanceUID = i.SeriesInstanceUID) AS n_instances
+FROM index i
+WHERE i.Modality IN ({in_mods})
+  AND i.series_size_MB > {IDC_SIZE_MB_MIN}
+  AND i.series_size_MB < {IDC_SIZE_MB_MAX}
+ORDER BY CASE WHEN i.BodyPartExamined IN ({in_body}) THEN 0 ELSE 1 END,
+         random()
+LIMIT 10
+"""
+    rows = client.sql_query(query)
+    if rows is None or len(rows) == 0:
+        raise ValueError(
+            f"No public {modality} series found in IDC for this query.")
+    for r in rows.to_dict("records"):
+        instances = int(r.get("n_instances") or 0)
+        if 1 <= instances <= IDC_MAX_INSTANCES:
+            return {
+                "series_uid": r["SeriesInstanceUID"],
+                "collection_id": r.get("collection_id") or "",
+                "series_description": r.get("SeriesDescription") or "",
+                "body_part": r.get("BodyPartExamined") or "",
+                "size_mb": float(r.get("series_size_MB") or 0),
+                "instances": instances,
+            }
+    raise ValueError(
+        f"Only large {modality} series were found; none was small enough "
+        f"(<= {IDC_MAX_INSTANCES} instances) for this demo.")
+
+
+def _download_series_from_gcs(client, series_uid, dest_dir):
+    """Direct fallback: fetch the series file-by-file over the public GCS bucket."""
+    rows = client.sql_query(
+        f"SELECT gcs_url FROM index WHERE SeriesInstanceUID = '{series_uid}'")
+    if rows is None or len(rows) == 0:
+        raise ValueError(
+            f"No IDC file URLs found for series {series_uid}.")
+    for i, r in enumerate(rows.to_dict("records")):
+        url = r.get("gcs_url")
+        if not url:
+            continue
+        resp = requests.get(url, timeout=120)
+        resp.raise_for_status()
+        out_path = dest_dir / f"{i:04d}.dcm"
+        out_path.write_bytes(resp.content)
+    logger.info("Downloaded %d files for IDC series %s via GCS.",
+                i + 1, series_uid)
+
+
+def _find_dicom_paths(root):
+    """Recursively find DICOM files (handles zip archives and extension-less
+    files by peeking at the DICOM header)."""
+    import zipfile
+
+    import pydicom
+
+    root = Path(root)
+    for zf in list(root.rglob("*.zip")):
+        try:
+            with zipfile.ZipFile(zf) as z:
+                z.extractall(root)
+        except zipfile.BadZipFile:  # noqa: PERF203
+            continue
+
+    candidates = list(root.rglob("*.dcm"))
+    candidates += [f for f in root.rglob("*")
+                   if f.is_file() and f.suffix.lower()
+                   not in {".zip", ".png", ".jpg", ".jpeg", ".webp", ".gif"}]
+    found = []
+    for f in candidates:
+        try:
+            pydicom.dcmread(str(f), force=True, stop_before_pixels=True)
+            found.append(f)
+        except Exception:  # noqa: BLE001 - not a DICOM file
+            continue
+    return found
+
+
+def download_idc_series(series_uid, dest_dir):
+    """Download a series' DICOM files into dest_dir and return their paths."""
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    from idc_index import IDCClient
+    client = IDCClient.client()
+    try:
+        client.download_dicom_series(
+            seriesInstanceUID=[series_uid], downloadDir=str(dest_dir))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("idc-index download failed (%s); "
+                       "falling back to direct GCS fetch.", e)
+        _download_series_from_gcs(client, series_uid, dest_dir)
+
+    files = _find_dicom_paths(dest_dir)
+    if not files:
+        raise ValueError(
+            f"No readable DICOM files were downloaded for series {series_uid}.")
+    return files
+
+
+def fetch_idc_sample(modality, dest_dir=None):
+    """Download one small public cancer sample series of the requested
+    modality and return (series_metadata, list_of_dicom_paths)."""
+    import tempfile
+
+    info = search_idc_series(modality)
+    if dest_dir is None:
+        dest_dir = Path(tempfile.mkdtemp(
+            prefix=f"radexplain-idc-{info['series_uid'][:8]}-"))
+    files = download_idc_series(info["series_uid"], dest_dir)
+    return info, files

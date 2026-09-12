@@ -5,3 +5,4 @@ diskcache
 requests
 numpy
 pydicom
+idc-index

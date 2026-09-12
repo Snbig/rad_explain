@@ -695,8 +695,95 @@ h2 {
     border: 1px solid #e0e0e0;
     border-radius: 6px;
     padding: 14px;
-    white-space: pre-wrap;
+    white-space: normal;
+    overflow-wrap: break-word;
     font-size: 14px;
     line-height: 1.6;
     color: #333;
+}
+
+.upload-result p {
+    margin: 0 0 8px;
+}
+
+.upload-result ul,
+.upload-result ol {
+    margin: 4px 0 8px;
+    padding-left: 22px;
+}
+
+.upload-result li {
+    margin-bottom: 2px;
+}
+
+.upload-result h1,
+.upload-result h2,
+.upload-result h3,
+.upload-result h4 {
+    margin: 10px 0 4px;
+    font-size: 1.05em;
+}
+
+.upload-result strong {
+    color: #111;
+}
+
+.upload-result code {
+    background: #eef1f4;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
+/* --- IDC sample buttons --- */
+.upload-divider {
+    text-align: center;
+    font-size: 12px;
+    color: #888;
+    margin: 4px 0 0;
+}
+
+.upload-idc-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+}
+
+.idc-button {
+    background: #fff;
+    color: #1a73e8;
+    border: 1px solid #1a73e8;
+    border-radius: 4px;
+    padding: 8px 16px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+}
+
+.idc-button:hover {
+    background: #e8f0fe;
+}
+
+.idc-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+#explanation-content ul,
+#explanation-content ol {
+    margin: 4px 0;
+    padding-left: 18px;
+}
+
+#explanation-content p {
+    margin: 6px 0;
+}
+
+#explanation-content h1,
+#explanation-content h2,
+#explanation-content h3,
+#explanation-content h4 {
+    margin: 8px 0 4px;
+    font-size: 1em;
 }

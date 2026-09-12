@@ -32,6 +32,7 @@
         rel="stylesheet">
     <!-- Link to the correct JS file -->
     <script src="https://unpkg.com/compromise" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
     <script src="{{ url_for('static', filename='js/demo.js') }}" defer></script>
 </head>
 
@@ -152,6 +153,12 @@
                     <input type="text" id="upload-question"
                            placeholder="e.g. What are the main findings?">
                     <button id="upload-analyze" class="upload-button">Analyze</button>
+                </div>
+                <div class="upload-divider">or analyze a real public cancer sample from the NCI Imaging Data Commons (no files needed)</div>
+                <div class="upload-idc-buttons">
+                    <button type="button" class="idc-button" data-idc-modality="X-ray">X-Ray</button>
+                    <button type="button" class="idc-button" data-idc-modality="CT">CT</button>
+                    <button type="button" class="idc-button" data-idc-modality="MRI">MRI</button>
                 </div>
                 <div id="upload-status" class="loading" style="display: none;"></div>
                 <div id="upload-error" class="error-message" style="display: none;"></div>
