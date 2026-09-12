@@ -60,6 +60,10 @@ The sample is down-sampled to **2 prompt slices** to stay within a 16 GB T4 at
 4-bit quantization — matching the `high_dimensional_ct` notebook's tuning
 (image prefill, not response length, is what OOMs the GPU at generation time).
 
+On your own uploads the UI's **Slices** control samples 1–30 DICOM slices into
+the prompt (default 8). Higher counts give the model more context but raise GPU
+memory: lower it if you hit CUDA OOM.
+
 Clicking any sentence or bullet of a generated explanation opens a
 plain-language explanation of that sentence (the same interaction the demo's
 bundled reports use).

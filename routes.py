@@ -464,7 +464,7 @@ def upload_explain():
 
     max_slices = 8
     try:
-        max_slices = min(max(int(request.form.get('max_slices') or 8), 1), 16)
+        max_slices = min(max(int(request.form.get('max_slices') or 8), 1), 30)
     except ValueError:
         max_slices = 8
 

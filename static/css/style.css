@@ -643,6 +643,10 @@ h2 {
     border-radius: 4px;
 }
 
+#upload-slices {
+    width: 84px;
+}
+
 #upload-question {
     flex: 1;
     min-width: 200px;

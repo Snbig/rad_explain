@@ -149,6 +149,9 @@
                         <option value="CT">CT</option>
                         <option value="MRI">MRI</option>
                     </select>
+                    <label for="upload-slices">Slices (1–30)</label>
+                    <input type="number" id="upload-slices" min="1" max="30" value="8"
+                           title="How many DICOM slices to sample into the prompt (default 8)">
                     <label>Question (optional)</label>
                     <input type="text" id="upload-question"
                            placeholder="e.g. What are the main findings?">

@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 MODALITY_XRAY = {"CR", "DX", "XC", "RF", "MG"}
 MODALITY_CT = {"CT"}
 MODALITY_MRI = {"MR"}
-MAX_PROMPT_IMAGES = 8  # Cap the number of slice images encoded in the prompt.
+MAX_PROMPT_IMAGES = 30  # Max slice images allowed in the prompt (UI clamps to this too).
 
 # User-friendly modality label -> DICOM Modality tag values.
 IDC_MODALITY_TAGS = {

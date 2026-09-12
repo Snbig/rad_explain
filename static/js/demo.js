@@ -40,6 +40,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const reportSection = document.querySelector('.report-section');
     const uploadFilesInput = document.getElementById('upload-files');
     const uploadModality = document.getElementById('upload-modality');
+    const uploadSlices = document.getElementById('upload-slices');
     const uploadQuestion = document.getElementById('upload-question');
     const uploadAnalyzeButton = document.getElementById('upload-analyze');
     const uploadStatus = document.getElementById('upload-status');
@@ -408,6 +409,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (uploadModality && uploadModality.value) {
             formData.append('modality', uploadModality.value);
+        }
+        if (uploadSlices && uploadSlices.value) {
+            const n = Math.max(1, Math.min(parseInt(uploadSlices.value, 10) || 8, 30));
+            formData.append('max_slices', n);
         }
         if (uploadQuestion && uploadQuestion.value.trim()) {
             formData.append('question', uploadQuestion.value.trim());
