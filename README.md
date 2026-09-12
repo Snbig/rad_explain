@@ -69,6 +69,24 @@ Clicking any sentence or bullet of a generated explanation opens a
 plain-language explanation of that sentence (the same interaction the demo's
 bundled reports use).
 
+### DICOM preprocessing (uploaded series + IDC samples)
+
+Volumetric DICOM goes through a small pipeline before the prompt is built:
+
+1. **DICOM → NIfTI**: every frame is read, z-stacked into one volume, and
+   written as a cleaned `volume_cleaned.nii.gz` (left in the upload temp dir).
+2. **Remove intensity & empty slices**: DICOM's intensity calibration is
+   dropped — CT is clipped to a fixed anatomical window, everything else is
+   percentile-stretched — and near-constant (air-only / padding) slices are
+   deleted.
+3. **Attention-based key-slice selection**: each slice is scored by saliency
+   (edge energy × entropy × non-background content × center prior), then a
+   greedy diversity-aware pass picks the *k* key slices, discarding near-
+   duplicate ones. The original DICOM instance numbers are sent as a
+   **reference** in the prompt so the model knows which slices it is reading.
+
+The selected slice count follows the UI's **Slices** control (1–30).
+
 **Note:** This space uses a HuggingFace endpoint that may scale down to zero due to inactivity. If this occurs, please allow approximately 10 minutes for the endpoint to restart. As an alternative, the model can be deployed on ModelGarden (see the link below).
 
 **Note for self-hosting this fork:** the app requires the `HF_TOKEN` and

@@ -433,7 +433,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const modalityLabels = { 'X-ray': 'Chest X-Ray', 'CT': 'CT', 'MRI': 'MRI' };
             const modalityLabel = modalityLabels[data.modality] || data.modality || 'Image';
             const meta = data.total_slices > 1
-                ? `${modalityLabel} · ${data.total_slices} slices in series (using ${data.prompt_slices})`
+                ? `${modalityLabel} · ${data.total_slices} slices in series (using ${data.prompt_slices} key slices)`
                 : `${modalityLabel} · single image`;
 
             if (uploadResult) {
@@ -503,7 +503,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const modalityLabels = { 'X-ray': 'Chest X-Ray', 'CT': 'CT', 'MRI': 'MRI' };
             const modalityLabel = modalityLabels[data.modality] || data.modality || 'Image';
             const meta = data.total_slices > 1
-                ? `${modalityLabel} · ${data.total_slices} slices in series (using ${data.prompt_slices})`
+                ? `${modalityLabel} · ${data.total_slices} slices in series (using ${data.prompt_slices} key slices)`
                 : `${modalityLabel} · single image`;
             const sourceLine = [data.source, data.body_part, data.series]
                 .filter(Boolean)

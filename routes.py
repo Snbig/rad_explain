@@ -73,13 +73,22 @@ def _build_messages(result, question=""):
     if total_slices > 1:
         instruction = (
             f"You are reviewing a {modality} series with {total_slices} "
-            "slices. The evenly-sampled slices below represent the volume. "
+            "slices. The slices below were selected automatically (attention-"
+            "based) and represent the key content of the volume. "
             "Review them as a radiologist would a full study"
         )
         content = [{"type": "text", "text": instruction}]
         for prev in previews:
             content.append({"type": "image", "image": prev["data_url"]})
             content.append({"type": "text", "text": f"SLICE {prev['label']}"})
+        refs = result.get("slice_references")
+        if refs:
+            content.append({"type": "text", "text": (
+                "Reference: the images above are slices of one DICOM series "
+                "converted to NIfTI with the calibration removed, blank/empty "
+                "slices deleted, and the key slices selected automatically. "
+                "The original DICOM instance (slice) numbers shown are: "
+                + ", ".join(str(r) for r in refs) + ".")})
     else:
         instruction = f"You are reviewing a {modality} image."
         content = [{"type": "text", "text": instruction},
@@ -487,7 +496,8 @@ def upload_explain():
         # missing so the default label is X-ray and the series count comes
         # from the number of images uploaded.
         result = imaging.process_upload(
-            saved_paths, max_slices=max_slices, modality_override=modality_override)
+            saved_paths, max_slices=max_slices, modality_override=modality_override,
+            dest_dir=tmp_root)
 
         modality = result["modality"]
         total_slices = result["total_slices"]

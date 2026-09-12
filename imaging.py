@@ -275,40 +275,314 @@ def process_plain_images(paths, max_slices=MAX_PROMPT_IMAGES):
             "skipped_files": skipped}
 
 
-def process_upload_dicom(paths, max_slices=MAX_PROMPT_IMAGES):
-    """Parse a DICOM series (or single frame) into windowed slice previews."""
+def _read_dicom_frames(path):
+    """Read one DICOM file and return raw (un-windowed) 2D frame arrays.
+
+    Single-frame files yield one entry; multi-frame files (e.g. Enhanced MR)
+    yield one entry per frame. Raw pixel values are kept so CT can be
+    straightened to real HU afterwards and then *de-calibrated* by the fixed
+    windowing, instead of trusting the hitting DICOM WindowCenter/Width.
+    """
+    import pydicom
+    from pydicom.errors import InvalidDicomError
+
+    try:
+        ds = pydicom.dcmread(str(path), force=False)
+        pixel_array = ds.pixel_array
+    except InvalidDicomError:
+        raise ValueError(f"Not a readable DICOM file: {path}")
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"Error reading DICOM file {path}: {e}")
+
+    arr = np.asarray(pixel_array)
+    modality = str(getattr(ds, "Modality", "")).strip().upper()
+    if arr.ndim == 3 and arr.shape[-1] != 3:
+        frames = [arr[i] for i in range(arr.shape[0])]
+    else:
+        frames = [arr]
+
+    base_inst = int(getattr(ds, "InstanceNumber", 0) or 0)
+    slice_loc = getattr(ds, "SliceLocation", None)
+    try:
+        slice_loc = float(np.atleast_1d(np.asarray(slice_loc, dtype=float))[0])
+    except (TypeError, ValueError):
+        slice_loc = float("nan")
+    spacing = getattr(ds, "PixelSpacing", None)
+    try:
+        spacing = [float(x) for x in np.atleast_1d(
+            np.asarray(spacing, dtype=float))]
+    except (TypeError, ValueError):
+        spacing = None
+
+    common = {
+        "modality": modality,
+        "series_desc": str(getattr(ds, "SeriesDescription", "") or ""),
+        "body_part": str(getattr(ds, "BodyPartExamined", "") or ""),
+        "slice_loc": slice_loc,
+        "spacing": spacing,
+        "slope": float(getattr(ds, "RescaleSlope", 1) or 1),
+        "intercept": float(getattr(ds, "RescaleIntercept", 0) or 0),
+    }
+    return [{"array": f, "instance": base_inst + fi, "frame": fi, **common}
+            for fi, f in enumerate(frames)]
+
+
+def _sort_frames(frames):
+    def _key(f):
+        loc = f["slice_loc"]
+        if np.isfinite(loc):
+            return (0, loc, f["instance"], f["frame"])
+        return (1, f["instance"], f["frame"])
+    return sorted(frames, key=_key)
+
+
+def _mask_empty_slices(volume):
+    """Drop near-constant (empty / air-only / padding) slices from a volume."""
+    n = volume.shape[0]
+    if n <= 2:
+        return np.arange(n)
+    keep = []
+    for z in range(n):
+        s = volume[z]
+        p0 = np.percentile(s, 0.5)
+        p99 = np.percentile(s, 99.5)
+        peak = float(((s >= p99) | (s <= p0)).mean())
+        if peak <= 0.995:
+            keep.append(z)
+    if not keep:
+        keep = list(range(n))
+    return np.array(keep, dtype=int)
+
+
+def _decalibrate_volume(volume, is_ct):
+    """Return intensity-normalized float volume (removes calibration).
+
+    For CT the raw HU are clipped to a fixed anatomical window and normalized
+    to [0, 1]; everything else is percentile-stretched. Attention and empty-
+    slice logic operate on structure, not on vendor calibration.
+    """
+    volume = np.asarray(volume, dtype=np.float64)
+    if is_ct:
+        lo, hi = -175.0, 375.0
+        volume = np.clip(volume, lo, hi)
+    lo, hi = np.percentile(volume, [1.0, 99.0])
+    if hi <= lo:
+        return np.zeros_like(volume)
+    return np.clip((volume - lo) / (hi - lo), 0.0, 1.0)
+
+
+def _slice_edge_energy(s):
+    gy, gx = np.gradient(s)
+    return float(np.hypot(gx, gy).mean())
+
+
+def _slice_entropy(s):
+    hist, _ = np.histogram(s, bins=64, range=(0.0, 1.0))
+    p = hist / hist.sum()
+    p = p[p > 0]
+    if p.size == 0:
+        return 0.0
+    return float(-(p * np.log2(p)).sum() / np.log2(64))
+
+
+def _slice_non_background(s):
+    return float((s > 0.05).mean())
+
+
+def _slice_similarity(a, b):
+    """Normalized cross-correlation between two slices at 16x16 resolution."""
+    from PIL import Image
+    ta = np.asarray(Image.fromarray(a).resize((16, 16), Image.LANCZOS),
+                    dtype=np.float64).ravel()
+    tb = np.asarray(Image.fromarray(b).resize((16, 16), Image.LANCZOS),
+                    dtype=np.float64).ravel()
+    ca = np.corrcoef(ta, tb)[0, 1]
+    return ca if ca == ca else 0.0
+
+
+def attention_select_slices(volume, k):
+    """Attention-based key-slice selection.
+
+    Each slice gets a saliency score (gradient/edge energy x entropy x
+    non-background content x a weak center-of-volume prior), then a greedy,
+    diversity-aware pass picks the *k* slices: at each step the best slice is
+    the one with the highest saliency not already represented by an already
+    selected slice (measured by normalized cross-correlation). This mimics
+    attention: it favors informative slices and discards near-duplicate ones.
+    Returns the selected z-indices in ascending z order.
+    """
+    n = volume.shape[0]
+    k = max(1, min(int(k), n))
+    if n <= k:
+        return list(range(n))
+
+    mid = (n - 1) / 2.0
+    center_prior = [np.exp(-0.5 * ((z - mid) / (0.35 * n)) ** 2)
+                    for z in range(n)]
+    scores = np.array([
+        (_slice_edge_energy(volume[z]) * (0.5 + _slice_entropy(volume[z]))
+         * (0.3 + _slice_non_background(volume[z]))
+         * (0.5 + center_prior[z]))
+        for z in range(n)], dtype=np.float64)
+    if not np.isfinite(scores).all() or scores.max() <= 0:
+        scores = np.arange(n, dtype=np.float64) + 1.0
+
+    selected = []
+    candidates = list(range(n))
+    while len(selected) < k and candidates:
+        cur = scores[candidates].copy()
+        if selected:
+            for i, cand in enumerate(candidates):
+                sim = max(abs(_slice_similarity(volume[cand], volume[j]))
+                          for j in selected)
+                cur[i] *= max(0.2, 1.0 - sim)
+        pick = candidates[int(np.argmax(cur))]
+        selected.append(pick)
+        candidates.remove(pick)
+    return sorted(selected)
+
+
+def _window_slice_uint8(arr, modality):
+    """Fixed-window a raw slice to uint8 (removes DICOM intensity calibration)."""
+    arr = np.asarray(arr, dtype=np.float64)
+    if modality == "CT":
+        return _apply_ct_window(arr, 40.0, 400.0)
+    return _stretch_to_uint8(arr)
+
+
+def _best_effort_affine(frames, n_z):
+    """Build an approximate DICOM-like affine (mm) for the NIfTI header."""
+    spacing = [1.0, 1.0, 1.0]
+    for f in frames:
+        if f.get("spacing") and len(f["spacing"]) >= 2:
+            spacing[0], spacing[1] = f["spacing"][0], f["spacing"][1]
+            break
+    for f in frames:
+        loc = f.get("slice_loc")
+        if np.isfinite(loc):
+            zs = sorted({round(loc, 3) for loc in
+                         (fr.get("slice_loc") for fr in frames)
+                         if np.isfinite(loc)})
+            if len(zs) >= 2:
+                spacing[2] = abs(zs[1] - zs[0])
+            break
+    affine = np.diag([spacing[0], spacing[1], spacing[2], 1.0])
+    return affine
+
+
+def write_nifti(image, out_path, affine=None):
+    """Write a volume (z,y,x) to a NIfTI-1 file."""
+    import nibabel as nib
+    affine = np.eye(4) if affine is None else affine
+    vol = np.asarray(image)
+    if vol.dtype != np.float32 and vol.dtype != np.int16:
+        vol = vol.astype(np.float32)
+    nib.save(nib.Nifti1Image(vol, affine), str(out_path))
+    return out_path
+
+
+def process_upload_dicom(paths, max_slices=MAX_PROMPT_IMAGES, dest_dir=None,
+                         write_volume=True):
+    """Parse a DICOM series into a cleaned NIfTI volume and windowed previews.
+
+    1. Every frame is read raw and assembled into a z-stacked volume.
+    2. Intensity calibration is removed: CT uses a fixed anatomical window,
+       everything else is percentile-stretched; near-constant, empty slices
+       (air-only/padding) are deleted.
+    3. The cleaned volume is saved as NIfTI (when ``dest_dir`` is given).
+    4. Key slices are chosen with attention-based selection and windowed to
+       PNGs; the original DICOM instance numbers are returned as references.
+    """
+    import tempfile
+
     dicom_files = collect_dicom_files(paths)
     if not dicom_files:
         raise ValueError("No DICOM files (.dcm) found in the uploaded files.")
     if len(dicom_files) > 60:
         logger.warning("Large DICOM series (%d files); sampling for prompt.",
                        len(dicom_files))
-    parsed = []
+
+    frames = []
     skipped_files = []
     for f in dicom_files:
         try:
-            parsed.extend(parse_dicom_slice(f))
-        except Exception as e:  # noqa: BLE001 - skip one bad file, keep the series
+            frames.extend(_read_dicom_frames(f))
+        except Exception as e:  # noqa: BLE001 - skip one bad file, keep series
             logger.warning("Skipping unreadable DICOM file %s: %s", f, e)
             skipped_files.append(f"{f.name} ({e})")
-    if not parsed:
+    if not frames:
         raise ValueError("No readable DICOM slices found in the uploaded files.")
-    parsed.sort(key=lambda p: p["instance"])
-    total = len(parsed)
-    sliced = sample_slices(parsed, max_slices=max_slices)
-    modalities = {p["modality"] for p in parsed}
+    frames = _sort_frames(frames)
+
+    modalities = {f["modality"] for f in frames}
     modality = "CT" if "CT" in modalities else (
                "MRI" if "MRI" in modalities else "X-ray")
+    is_ct = modality == "CT"
+
+    # Straighten to HU for CT (needed for the fixed window), otherwise raw.
+    raw = []
+    for f in frames:
+        a = np.asarray(f["array"], dtype=np.float64)
+        if is_ct:
+            a = a * f["slope"] + f["intercept"]
+        raw.append(a)
+    try:
+        volume = np.stack(raw, axis=0)
+    except ValueError:
+        # Frames of unequal shape: keep the common grid, fall back to
+        # nearest-neighbor resampling for outliers.
+        h, w = raw[0].shape
+        rs = [np.resize(a, (h, w)) for a in raw]
+        volume = np.stack(rs, axis=0)
+
+    keep_z = _mask_empty_slices(volume)
+    volume = volume[keep_z]
+    kept_frames = [frames[z] for z in keep_z]
+    total = volume.shape[0]
+
+    cleaned = _decalibrate_volume(volume, is_ct)
+
+    nifti_path = None
+    if write_volume and dest_dir is not None:
+        dest_dir = Path(dest_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out_path = dest_dir / "volume_cleaned.nii.gz"
+        try:
+            affine = _best_effort_affine(kept_frames, total)
+            nifti_array = (np.round(volume).astype(np.int16) if is_ct
+                           else volume.astype(np.float32))
+            write_nifti(nifti_array, out_path, affine=affine)
+            nifti_path = str(out_path)
+        except Exception as e:  # noqa: BLE001 - NIfTI is a nicety
+            logger.warning("Could not write NIfTI volume: %s", e)
+
+    selected_z = attention_select_slices(cleaned, max_slices)
     previews = []
-    for i, p in enumerate(sliced, 1):
-        data_url = array_to_png_data_url(p["pixels"])
-        previews.append({"label": f"Slice {i}/{total}", "data_url": data_url})
-    return {"modality": modality, "total_slices": total,
-            "prompt_slices": len(previews), "previews": previews,
-            "skipped_files": skipped_files[:20]}
+    slice_references = []
+    for i, z in enumerate(selected_z, 1):
+        pixels = _window_slice_uint8(volume[z], modality)
+        inst = int(kept_frames[z]["instance"])
+        previews.append({
+            "label": f"Slice {z + 1}/{total} (inst {inst})",
+            "data_url": array_to_png_data_url(pixels),
+        })
+        slice_references.append(inst)
+
+    return {
+        "modality": modality,
+        "total_slices": total,
+        "prompt_slices": len(previews),
+        "previews": previews,
+        "slice_references": slice_references,
+        "series_desc": kept_frames[0]["series_desc"],
+        "body_part": kept_frames[0]["body_part"],
+        "nifti_path": nifti_path,
+        "skipped_files": skipped_files[:20],
+    }
 
 
-def process_upload(paths, max_slices=MAX_PROMPT_IMAGES, modality_override=None):
+def process_upload(paths, max_slices=MAX_PROMPT_IMAGES, modality_override=None,
+                   dest_dir=None):
     """Unified entry point for /upload_explain.
 
     Splits the uploaded files into DICOM (.dcm/.dicom/.zip) and plain-image
@@ -332,7 +606,8 @@ def process_upload(paths, max_slices=MAX_PROMPT_IMAGES, modality_override=None):
         skipped = result["skipped_files"]
         result["modality"] = modality_override or result["modality"]
     else:
-        dcm_result = process_upload_dicom(dicom_paths, max_slices=max_slices)
+        dcm_result = process_upload_dicom(dicom_paths, max_slices=max_slices,
+                                          dest_dir=dest_dir)
         result = dict(dcm_result)
         skipped = list(dcm_result["skipped_files"])
         if plain_paths:

@@ -5,6 +5,7 @@ diskcache
 requests
 numpy
 pydicom
+nibabel
 idc-index
 # DICOM pixel-data decompression for MRI (JPEG2000 / JPEG-LS / RLE / JPEG)
 pylibjpeg
