@@ -48,8 +48,13 @@ class LLMServiceError(Exception):
         self.status = status
 
 
-def _build_messages(result, question=""):
-    """Build the multimodal MedGemma message list from processed previews."""
+def _build_messages(result, question="", source=None):
+    """Build the multimodal MedGemma message list from processed previews.
+
+    ``source`` may carry provenance metadata about the sample (e.g. the IDC
+    collection / series), which is given to the model so it knows where the
+    images came from.
+    """
     modality = result["modality"]
     total_slices = result["total_slices"]
     previews = result["previews"]
@@ -104,6 +109,26 @@ def _build_messages(result, question=""):
                         "text": ("Describe the most important findings in "
                                  "simple terms and state whether the study "
                                  "appears normal or abnormal.")})
+
+    if source:
+        parts = []
+        if source.get("collection_id"):
+            parts.append(f"collection: {source['collection_id']}")
+        if source.get("series_description"):
+            parts.append(f"series: {source['series_description']}")
+        if source.get("body_part"):
+            parts.append(f"body part: {source['body_part']}")
+        if source.get("instances"):
+            parts.append(f"{source['instances']} instances")
+        if source.get("size_mb"):
+            parts.append(f"{source['size_mb']:.0f} MB")
+        if parts:
+            src_text = "Source of the images: " + ", ".join(parts) + "."
+            if source.get("report_text"):
+                src_text += (" An attached radiology report is also provided. "
+                             "You may reference it for context, but interpret "
+                             "the actual images and do not copy it verbatim.")
+            content.append({"type": "text", "text": src_text})
 
     return [
         {"role": "system",
@@ -223,6 +248,47 @@ def _ensure_three_sections(explanation, messages):
     missing = _missing_required_headings(explanation)
     return explanation + "\n\n" + "\n\n".join(
         _MISSING_SECTION_FALLBACK[h] for h in missing)
+
+
+def _extract_report_text(files):
+    """Best-effort: pull readable radiology report text out of the sample's
+    DICOM files (Structured Report / SR objects) when a collection ships one.
+    """
+    try:
+        import pydicom
+    except ImportError:
+        return ""
+    out_lines = []
+
+    def _walk(ds, out):
+        cs = getattr(ds, "ContentSequence", None)
+        if cs is None:
+            return
+        for item in cs:
+            value_type = str(getattr(item, "ValueType", "") or "").upper()
+            tv = getattr(item, "TextValue", None)
+            if value_type in ("TEXT", "CODE", "NUM") and tv:
+                out.append(str(tv))
+            _walk(item, out)
+
+    for f in files:
+        try:
+            ds = pydicom.dcmread(str(f), force=True, stop_before_pixels=True)
+            sop = str(getattr(ds, "SOPClassUID", "") or "")
+            mod = str(getattr(ds, "Modality", "") or "").upper()
+            # SR SOP classes start with 1.2.840.10008.5.1.4.1.1.88.
+            is_sr = sop.startswith("1.2.840.10008.5.1.4.1.1.88") or mod == "SR"
+            if not is_sr:
+                # Also accept basic text reports (e.g. OT with a StudyDescription).
+                if mod not in ("OT", "DOC"):
+                    continue
+            text_header = str(getattr(ds, "StudyDescription", "") or "").strip()
+            if text_header:
+                out_lines.append(text_header)
+            _walk(ds, out_lines)
+        except Exception:  # noqa: BLE001 - one bad file must not break the sample
+            continue
+    return "\n".join(dict.fromkeys(l for l in out_lines if l)).strip()
 
 
 def _stream_explanation(messages, max_tokens=1536):
@@ -714,7 +780,13 @@ def idc_explain():
         previews = result["previews"]
         total_slices = result["total_slices"]
 
-        messages = _build_messages(result, question)
+        # Give MedGemma the sample's source: collection / series provenance and,
+        # when the collection ships one, the radiology report text (best-effort).
+        _info = dict(info)
+        _report = _extract_report_text(files)
+        if _report:
+            _info["report_text"] = _report
+        messages = _build_messages(result, question, source=_info)
         explanation = _stream_explanation(messages, max_tokens=700)
         explanation = _ensure_three_sections(explanation, messages)
         if not explanation:
