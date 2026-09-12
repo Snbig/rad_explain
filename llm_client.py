@@ -82,6 +82,9 @@ def make_chat_completion_request(
     else:
         full_url = temp_url + "/v1/chat/completions"
 
-    response = requests.post(full_url, headers=headers, json=payload, stream=stream, timeout=60)
+    # Generous read timeout: the local Colab serve_medgemma server computes
+    # the full answer before streaming, and a T4 generating multi-slice image
+    # answers can take well over 60 s before the first bytes arrive.
+    response = requests.post(full_url, headers=headers, json=payload, stream=stream, timeout=(10, 900))
     response.raise_for_status()
     return response

@@ -107,12 +107,21 @@ def _normalize_messages(chat_messages):
 
 
 def generate(messages, max_new_tokens=600):
-    """Tokenize image/text content and generate a response (deterministic)."""
+    """Tokenize image/text content and generate a response (deterministic).
+
+    Mirrors the official high-dimensional CT notebook path exactly (including
+    ``continue_final_message=False``): apply_chat_template -> generate ->
+    post_process_image_text_to_text, stripping any echoed prompt prefix.
+    """
+    import time
+
     with _lock:
+        start = time.time()
         with torch.inference_mode():
             inputs = _processor.apply_chat_template(
                 messages,
                 add_generation_prompt=True,
+                continue_final_message=False,
                 return_tensors="pt",
                 tokenize=True,
                 return_dict=True,
@@ -128,6 +137,8 @@ def generate(messages, max_new_tokens=600):
     index = response.find(decoded_inputs)
     if 0 <= index <= 2:
         response = response[index + len(decoded_inputs):]
+    logger.info("generation took %.1fs (%d output tokens)",
+                time.time() - start, max_new_tokens)
     return response
 
 

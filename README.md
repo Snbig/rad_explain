@@ -48,6 +48,10 @@ small *real* public cancer imaging series from the NCI [Imaging Data Commons
 same pipeline — no files needed. Uses `idc-index` to pick a compact series
 (≤ 80 MB, ≤ 60 instances, body-part aware) and download its DICOM files.
 
+The sample is down-sampled to **2 prompt slices** to stay within a 16 GB T4 at
+4-bit quantization — matching the `high_dimensional_ct` notebook's tuning
+(image prefill, not response length, is what OOMs the GPU at generation time).
+
 **Note:** This space uses a HuggingFace endpoint that may scale down to zero due to inactivity. If this occurs, please allow approximately 10 minutes for the endpoint to restart. As an alternative, the model can be deployed on ModelGarden (see the link below).
 
 **Note for self-hosting this fork:** the app requires the `HF_TOKEN` and

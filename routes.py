@@ -34,6 +34,15 @@ main_bp = Blueprint('main', __name__)
 # LLM client is initialized in app.py create_app()
 
 
+class LLMServiceError(Exception):
+    """The MedGemma call itself failed; carries a client-safe message."""
+
+    def __init__(self, message, status=503):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
 def _build_messages(result, question=""):
     """Build the multimodal MedGemma message list from processed previews."""
     modality = result["modality"]
@@ -79,20 +88,41 @@ def _build_messages(result, question=""):
 
 
 def _stream_explanation(messages, max_tokens=600):
-    """Send the multimodal messages and collect the streamed answer."""
+    """Send the multimodal messages and collect the streamed answer.
+
+    Turns endpoint failures into LLMServiceError with the real reason (HTTP
+    status / error body / OOM / connection problem) so callers can surface a
+    useful message instead of a generic "service is starting up".
+    """
     logger.info("Sending (uploaded / IDC sample) request to LLM API (REST)...")
-    response = make_chat_completion_request(
-        model="tgi",
-        messages=messages,
-        top_p=None,
-        temperature=0,
-        max_tokens=max_tokens,
-        stream=True,
-        seed=None,
-        stop=None,
-        frequency_penalty=None,
-        presence_penalty=None,
-    )
+    try:
+        response = make_chat_completion_request(
+            model="tgi",
+            messages=messages,
+            top_p=None,
+            temperature=0,
+            max_tokens=max_tokens,
+            stream=True,
+            seed=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+        )
+    except requests.exceptions.HTTPError as e:
+        detail = str(e)
+        status = e.response.status_code if e.response is not None else 502
+        if e.response is not None:
+            try:
+                detail = (e.response.json().get("error", {}).get("message")
+                          or detail)
+            except Exception:  # noqa: BLE001
+                detail = (e.response.text[:300] if e.response.text else detail)
+        raise LLMServiceError(
+            f"LLM endpoint returned HTTP {status}: {detail}", status=status)
+    except requests.exceptions.RequestException as e:
+        raise LLMServiceError(
+            f"LLM endpoint is unreachable: {e}", status=503)
+
     explanation_parts = []
     for line in response.iter_lines():
         if not line:
@@ -405,6 +435,9 @@ def upload_explain():
     except ValueError as e:
         logger.warning(f"Invalid upload: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 400
+    except LLMServiceError as e:
+        logger.error(f"LLM service error for uploaded image: {e.message}")
+        return jsonify({"error": e.message}), e.status
     except requests.exceptions.RequestException as e:
         logger.error(f"Error during LLM API call for uploaded image: {e}", exc_info=True)
         return jsonify({"error": ("Failed to generate explanation. The service "
@@ -440,10 +473,25 @@ def idc_explain():
 
     question = (data.get('question') or '').strip()
 
+    # Match the high-dimensional CT notebook's T4 tuning (MAX_SLICE=2 /
+    # MAX_PROMPT_IMAGES=2): the image prefill is what OOMs a 16 GB GPU at
+    # generation time, not the response length. Fewer slices = safe on Colab.
+    max_slices = 2
+
     tmp_root = Path(tempfile.mkdtemp(prefix="radexplain-idc-"))
     try:
-        info, files = imaging.fetch_idc_sample(modality, dest_dir=tmp_root)
-        result = imaging.process_upload_dicom(files, max_slices=8)
+        try:
+            info, files = imaging.fetch_idc_sample(modality, dest_dir=tmp_root)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"IDC fetch failed: {e}", exc_info=True)
+            return jsonify({
+                "error": f"Could not reach the NCI Imaging Data Commons: {e}"
+            }), 502
+        except ValueError as e:
+            logger.warning(f"Invalid IDC sample request: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 400
+
+        result = imaging.process_upload_dicom(files, max_slices=max_slices)
         result["modality"] = modality
         previews = result["previews"]
         total_slices = result["total_slices"]
@@ -466,15 +514,12 @@ def idc_explain():
             "source": f"IDC · {info['collection_id']}"
                        f" (n={info['instances']}, {info['size_mb']:.0f} MB)",
         })
+    except LLMServiceError as e:
+        logger.error(f"LLM service error for IDC sample: {e.message}")
+        return jsonify({"error": e.message}), e.status
     except ValueError as e:
         logger.warning(f"Invalid IDC sample request: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 400
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error during LLM API call for IDC sample: {e}", exc_info=True)
-        return jsonify({"error": ("Failed to generate explanation. The service "
-                                  "might be temporarily unavailable and is now "
-                                  "likely starting up. Please try again in a few "
-                                  "moments.")}), 500
     except Exception as e:  # noqa: BLE001
         logger.error(f"Unexpected error handling IDC sample: {e}", exc_info=True)
         return jsonify({"error": f"Unexpected error fetching IDC sample: {e}"}), 500
