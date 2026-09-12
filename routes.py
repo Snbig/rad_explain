@@ -128,8 +128,10 @@ def _dedupe_repeated_sentences(text):
     for i in range(0, len(tokens), 2):
         part = tokens[i]
         sep = tokens[i + 1] if i + 1 < len(tokens) else ""
-        if re.search(r"[.!?\u2026]", part):
-            key = re.sub(r"[^a-z0-9]", "", part.lower())
+        is_sentence = (re.search(r"[.!?\u2026]", part)
+                       or re.match(r"^[-*+]\s+\S", part.strip()))
+        if is_sentence:
+            key = re.sub(r"[^a-z0-9]", "", part.lstrip("-*+ ").lower())
             if len(key) > 8 and key in seen:
                 continue
             seen.add(key)
@@ -194,7 +196,7 @@ def _stream_explanation(messages, max_tokens=1536):
                     f"Could not decode JSON from stream chunk: {json_data_str}")
         elif decoded_line.strip() == "[DONE]":
             break
-    return "".join(explanation_parts).strip()
+    return _dedupe_repeated_sentences("".join(explanation_parts)).strip()
 
 
 # --- Pre-fetched IDC sample pool --------------------------------------------

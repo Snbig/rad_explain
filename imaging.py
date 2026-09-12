@@ -64,7 +64,9 @@ IDC_PREFERRED_BODY_PART = {
 }
 
 # Keep downloaded / sampled series small enough for the 4-bit 16 GB Colab GPU.
-IDC_MAX_INSTANCES = 60
+# Preference band for the demo; the query orders by body-part fit then random
+# and only series within [min, max] instances qualify via the SQL filter.
+IDC_MAX_INSTANCES = 400
 IDC_SIZE_MB_MIN = 1
 IDC_SIZE_MB_MAX = 80
 
@@ -651,6 +653,10 @@ def search_idc_series(modality, limit=3, preferred_body_parts=None):
     scout_filters = " AND ".join(
         f"UPPER(COALESCE(i.SeriesDescription, '')) NOT LIKE '%{s}%'"
         for s in IDC_EXCLUDED_DESCRIPTIONS)
+    min_instances = IDC_MIN_INSTANCES.get(modality, 1)
+    instance_band = (f"(SELECT count(*) FROM index b "
+                     f"WHERE b.SeriesInstanceUID = i.SeriesInstanceUID) "
+                     f"BETWEEN {min_instances} AND {IDC_MAX_INSTANCES}")
     query = f"""
 SELECT i.SeriesInstanceUID AS SeriesInstanceUID,
        i.collection_id AS collection_id,
@@ -664,33 +670,56 @@ WHERE i.Modality IN ({in_mods})
   AND i.series_size_MB > {IDC_SIZE_MB_MIN}
   AND i.series_size_MB < {IDC_SIZE_MB_MAX}
   AND {scout_filters}
+  AND {instance_band}
 ORDER BY CASE WHEN i.BodyPartExamined IN ({in_body}) THEN 0 ELSE 1 END,
          random()
 LIMIT 40
 """
     rows = client.sql_query(query)
     if rows is None or len(rows) == 0:
+        # Fallback: no series in the preferred band. Pick the *smallest*
+        # real-volume series (>= min instances, still not a scout) instead of
+        # erroring out, so the demo always has something to show.
+        fallback_query = f"""
+SELECT i.SeriesInstanceUID AS SeriesInstanceUID,
+       i.collection_id AS collection_id,
+       i.SeriesDescription AS SeriesDescription,
+       i.BodyPartExamined AS BodyPartExamined,
+       i.series_size_MB AS series_size_MB,
+       (SELECT count(*) FROM index b
+        WHERE b.SeriesInstanceUID = i.SeriesInstanceUID) AS n_instances
+FROM index i
+WHERE i.Modality IN ({in_mods})
+  AND i.series_size_MB > {IDC_SIZE_MB_MIN}
+  AND i.series_size_MB < {IDC_SIZE_MB_MAX}
+  AND {scout_filters}
+  AND (SELECT count(*) FROM index b
+       WHERE b.SeriesInstanceUID = i.SeriesInstanceUID) >= {min_instances}
+ORDER BY n_instances ASC, random()
+LIMIT 40
+"""
+        rows = client.sql_query(fallback_query)
+    if rows is None or len(rows) == 0:
         raise ValueError(
-            f"No public {modality} series found in IDC for this query.")
-    min_instances = IDC_MIN_INSTANCES.get(modality, 1)
+            f"No public {modality} series with at least {min_instances} "
+            f"instances was found in IDC for this query.")
     infos = []
     for r in rows.to_dict("records"):
         instances = int(r.get("n_instances") or 0)
-        if min_instances <= instances <= IDC_MAX_INSTANCES:
-            infos.append({
-                "series_uid": r["SeriesInstanceUID"],
-                "collection_id": r.get("collection_id") or "",
-                "series_description": r.get("SeriesDescription") or "",
-                "body_part": r.get("BodyPartExamined") or "",
-                "size_mb": float(r.get("series_size_MB") or 0),
-                "instances": instances,
-            })
+        infos.append({
+            "series_uid": r["SeriesInstanceUID"],
+            "collection_id": r.get("collection_id") or "",
+            "series_description": r.get("SeriesDescription") or "",
+            "body_part": r.get("BodyPartExamined") or "",
+            "size_mb": float(r.get("series_size_MB") or 0),
+            "instances": instances,
+            "is_fallback": instances > IDC_MAX_INSTANCES,
+        })
         if len(infos) >= limit:
             break
     if not infos:
         raise ValueError(
-            f"Only large {modality} series were found; none was small enough "
-            f"(<= {IDC_MAX_INSTANCES} instances) for this demo.")
+            f"No usable {modality} series was found in IDC for this query.")
     return infos
 
 
