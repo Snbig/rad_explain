@@ -19,6 +19,10 @@ import shutil # For zipping the cache directory
 import json # For parsing streamed JSON data
 
 import os
+import random
+import threading
+import uuid
+import tempfile
 import config
 import utils
 import imaging
@@ -155,6 +159,71 @@ def _stream_explanation(messages, max_tokens=1536):
         elif decoded_line.strip() == "[DONE]":
             break
     return "".join(explanation_parts).strip()
+
+
+# --- Pre-fetched IDC sample pool --------------------------------------------
+# The "Fetch samples from IDC" button stages a handful of series here; the
+# X-ray/CT/MRI buttons then analyze a random sample from this pool instead of
+# downloading on every click.
+_IDC_POOL = {}
+_IDC_POOL_LOCK = threading.Lock()
+_IDC_POOL_ROOT = Path(tempfile.gettempdir()) / "radexplain-idc-pool"
+# How many samples to stage per modality when fetching the pool.
+IDC_POOL_COUNT = {"X-ray": 3, "CT": 4, "MRI": 3}
+
+
+def _idc_pool_summary():
+    with _IDC_POOL_LOCK:
+        return {m: len(_IDC_POOL.get(m, [])) for m in ("X-ray", "CT", "MRI")}
+
+
+def _pick_pooled_sample(modality):
+    """Return a random staged sample for the modality, or None."""
+    with _IDC_POOL_LOCK:
+        group = _IDC_POOL.get(modality) or []
+        if not group:
+            return None
+        return random.choice(group)
+
+
+def _clean_pool_dirs(keep_dirs):
+    """Remove series staging dirs that are no longer in the pool."""
+    _IDC_POOL_ROOT.mkdir(parents=True, exist_ok=True)
+    for child in _IDC_POOL_ROOT.iterdir():
+        if child.is_dir() and str(child) not in keep_dirs:
+            shutil.rmtree(child, ignore_errors=True)
+
+
+@main_bp.route('/idc_fetch_samples', methods=['POST'])
+def idc_fetch_samples():
+    """Stage ~10 public IDC samples (mixed modalities) for instant analysis."""
+    collected = {}
+    for modality, count in IDC_POOL_COUNT.items():
+        try:
+            samples = imaging.fetch_idc_sample_pool(
+                modality, count, _IDC_POOL_ROOT)
+        except (ValueError, requests.exceptions.RequestException) as e:
+            logger.warning("Could not stage %s samples: %s", modality, e)
+            samples = []
+        collected[modality] = samples
+
+    with _IDC_POOL_LOCK:
+        _IDC_POOL.clear()
+        for modality, samples in collected.items():
+            _IDC_POOL[modality] = []
+            for sample in samples:
+                sample["id"] = uuid.uuid4().hex[:8]
+                _IDC_POOL[modality].append(sample)
+        keep_dirs = {s["dir"]
+                     for group in _IDC_POOL.values() for s in group}
+    _clean_pool_dirs(keep_dirs)
+
+    by_modality = {m: len(collected[m]) for m in collected}
+    staged = sum(by_modality.values())
+    if staged == 0:
+        return jsonify({"error": "No IDC samples could be staged."}), 502
+    logger.info("Staged %d IDC samples: %s", staged, by_modality)
+    return jsonify({"samples": staged, "by_modality": by_modality})
 
 # --- Serve the cache directory as a zip file ---
 @main_bp.route('/download_cache')
@@ -465,12 +534,12 @@ def upload_explain():
 def idc_explain():
     """Explains a public X-ray / CT / MRI cancer sample from IDC.
 
-    Selects one small public cancer series from the NCI Imaging Data Commons
-    for the requested modality, downloads it, and runs it through the same
-    DICOM -> slice previews -> MedGemma pipeline as /upload_explain.
+    Prefers a random sample from the pre-fetched pool (see
+    /idc_fetch_samples); if none is staged for the requested modality, one
+    small public cancer series is fetched on the fly. Either way it runs
+    through the DICOM -> slice previews -> MedGemma pipeline.
     """
     import shutil
-    import tempfile
 
     if not llm_is_initialized():
         logger.error("LLM client (REST API) not initialized. Cannot process IDC sample.")
@@ -482,6 +551,7 @@ def idc_explain():
         return jsonify({"error": "modality must be one of: X-ray, CT, MRI."}), 400
 
     question = (data.get('question') or '').strip()
+    sample = _pick_pooled_sample(modality)
 
     # Match the high-dimensional CT notebook's T4 tuning (MAX_SLICE=2 /
     # MAX_PROMPT_IMAGES=2): the image prefill is what OOMs a 16 GB GPU at
@@ -491,7 +561,13 @@ def idc_explain():
     tmp_root = Path(tempfile.mkdtemp(prefix="radexplain-idc-"))
     try:
         try:
-            info, files = imaging.fetch_idc_sample(modality, dest_dir=tmp_root)
+            if sample is not None:
+                logger.info("Using pooled IDC %s sample %s",
+                            modality, sample["id"])
+                info = sample["info"]
+                files = sample["files"]
+            else:
+                info, files = imaging.fetch_idc_sample(modality, dest_dir=tmp_root)
         except requests.exceptions.RequestException as e:
             logger.error(f"IDC fetch failed: {e}", exc_info=True)
             return jsonify({
@@ -511,11 +587,15 @@ def idc_explain():
         if not explanation:
             logger.warning("Empty explanation from API for IDC sample.")
 
+        # For staged samples show the full (up-to-6-slice) previews while the
+        # prompt itself stays capped at max_slices.
+        display_previews = (sample["previews"] if sample is not None
+                            else previews)
         return jsonify({
             "modality": modality,
             "total_slices": total_slices,
             "prompt_slices": len(previews),
-            "previews": previews,
+            "previews": display_previews,
             "explanation": explanation or
                            "No explanation content received from the API.",
             "collection": info["collection_id"],
@@ -523,6 +603,7 @@ def idc_explain():
             "series": info["series_description"],
             "source": f"IDC · {info['collection_id']}"
                        f" (n={info['instances']}, {info['size_mb']:.0f} MB)",
+            "pool_counts": _idc_pool_summary(),
         })
     except LLMServiceError as e:
         logger.error(f"LLM service error for IDC sample: {e.message}")
@@ -534,4 +615,57 @@ def idc_explain():
         logger.error(f"Unexpected error handling IDC sample: {e}", exc_info=True)
         return jsonify({"error": f"Unexpected error fetching IDC sample: {e}"}), 500
     finally:
-        shutil.rmtree(tmp_root, ignore_errors=True)
+        if sample is None:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+@main_bp.route('/explain_sentence', methods=['POST'])
+def explain_response_sentence():
+    """Explain one sentence/bullet of a generated explanation in plain terms.
+
+    Mirrors the demo's report-sentence click flow, but for the AI-generated
+    Findings / Impression / Recommendations output.
+    """
+    if not llm_is_initialized():
+        logger.error("LLM client (REST API) not initialized. Cannot explain sentence.")
+        return jsonify({"error": "LLM client (REST API) not initialized. Check API key and base URL."}), 500
+
+    data = request.get_json(silent=True) or {}
+    sentence = (data.get('sentence') or '').strip()
+    modality = (data.get('modality') or '').strip() or 'Medical Image'
+    if not sentence:
+        return jsonify({"error": "Missing 'sentence' in request."}), 400
+
+    system_prompt = (
+        "You are a public-facing clinician. A learning user clicked a "
+        f"sentence from an AI-generated {modality} explanation and wants to "
+        "understand what that specific sentence means. "
+        "Explain ONLY the meaning of the provided sentence in simple, clear "
+        "terms. Explain any terminology or abbreviations. Be concise but "
+        "complete. Do not invent findings not implied by the sentence. "
+        "This is for educational purposes only and is not a diagnosis."
+    )
+    user_prompt_text = (f"Explain this sentence in plain language: "
+                        f"'{sentence}'")
+    messages = [
+        {"role": "system",
+         "content": [{"type": "text", "text": system_prompt}]},
+        {"role": "user",
+         "content": [{"type": "text", "text": user_prompt_text}]},
+    ]
+
+    try:
+        explanation = _stream_explanation(messages, max_tokens=512)
+        return jsonify({
+            "explanation": explanation or
+                           "No explanation content received from the API."
+        })
+    except LLMServiceError as e:
+        logger.error(f"LLM service error explaining sentence: {e.message}")
+        return jsonify({"error": e.message}), e.status
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error explaining sentence: {e}", exc_info=True)
+        return jsonify({"error": ("Failed to generate explanation. The service "
+                                  "might be temporarily unavailable and is now "
+                                  "likely starting up. Please try again in a "
+                                  "few moments.")}), 500

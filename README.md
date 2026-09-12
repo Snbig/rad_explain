@@ -51,9 +51,18 @@ small *real* public cancer imaging series from the NCI [Imaging Data Commons
 same pipeline — no files needed. Uses `idc-index` to pick a compact series
 (≤ 80 MB, ≤ 60 instances, body-part aware) and download its DICOM files.
 
+For instant results (no per-click download), the **"Fetch 10 samples from IDC"**
+button stages 3 X-ray + 4 CT + 3 MRI series up front; the X-Ray/CT/MRI buttons
+then pick a **random** staged sample, falling back to a live download if the
+pool is empty.
+
 The sample is down-sampled to **2 prompt slices** to stay within a 16 GB T4 at
 4-bit quantization — matching the `high_dimensional_ct` notebook's tuning
 (image prefill, not response length, is what OOMs the GPU at generation time).
+
+Clicking any sentence or bullet of a generated explanation opens a
+plain-language explanation of that sentence (the same interaction the demo's
+bundled reports use).
 
 **Note:** This space uses a HuggingFace endpoint that may scale down to zero due to inactivity. If this occurs, please allow approximately 10 minutes for the endpoint to restart. As an alternative, the model can be deployed on ModelGarden (see the link below).
 

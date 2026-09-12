@@ -147,6 +147,17 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         });
 
+        const uploadFetchButton = document.getElementById('upload-fetch-samples');
+        if (uploadFetchButton) {
+            uploadFetchButton.addEventListener('click', handleFetchSamples);
+        }
+
+        // Clickable sentences in the generated explanation -> plain-language
+        // wording for the clicked sentence (mirrors the report sentence flow).
+        if (uploadResult) {
+            uploadResult.addEventListener('click', handleRespSentenceClick);
+        }
+
         reportTextDisplay.addEventListener('click', handleSentenceClick);
 
         const firstCaseButton = caseSelectorTabsContainer?.querySelector('.nav-button-case');
@@ -419,6 +430,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (uploadResult) {
                 renderMarkdown(uploadResult, `${meta}\n\n${data.explanation || ''}`);
+                makeResponseSentences(uploadResult);
+                hideRespExplain();
             }
             if (data.previews && data.previews.length && uploadPreviewGrid) {
                 renderPreviewGrid(data.previews);
@@ -440,9 +453,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const idcButtons = document.querySelectorAll('.idc-button');
         idcButtons.forEach(b => { b.disabled = true; });
 
+        const poolCounts = currentPoolCounts;
         if (uploadStatus) {
             uploadStatus.textContent =
-                `Fetching a public ${modality} cancer sample from IDC... This can take a minute.`;
+                (poolCounts && poolCounts[modality])
+                    ? `Analyzing a random ${modality} sample from the pre-fetched pool...`
+                    : `Fetching a public ${modality} cancer sample from IDC... This can take a minute.`;
             uploadStatus.style.display = 'block';
         }
 
@@ -465,6 +481,7 @@ document.addEventListener('DOMContentLoaded', () => {
             })();
 
             if (uploadStatus) uploadStatus.style.display = 'none';
+            currentPoolCounts = data.pool_counts || currentPoolCounts;
 
             const modalityLabels = { 'X-ray': 'Chest X-Ray', 'CT': 'CT', 'MRI': 'MRI' };
             const modalityLabel = modalityLabels[data.modality] || data.modality || 'Image';
@@ -478,6 +495,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (uploadResult) {
                 renderMarkdown(uploadResult, `${header}\n\n${data.explanation || ''}`);
+                makeResponseSentences(uploadResult);
+                hideRespExplain();
             }
             if (data.previews && data.previews.length && uploadPreviewGrid) {
                 renderPreviewGrid(data.previews);
@@ -491,6 +510,158 @@ document.addEventListener('DOMContentLoaded', () => {
         } finally {
             clearTimeout(timeout);
             idcButtons.forEach(b => { b.disabled = false; });
+        }
+    }
+
+    let currentPoolCounts = null;
+    let fetchSamplesController = null;
+
+    async function handleFetchSamples() {
+        abortOngoingRequests();
+        abortOngoingFetchSamples();
+        if (uploadError) uploadError.style.display = 'none';
+        if (uploadResult) uploadResult.innerHTML = '';
+        if (uploadPreviewGrid) uploadPreviewGrid.innerHTML = '';
+        hideRespExplain();
+
+        const idcButtons = document.querySelectorAll('.idc-button');
+        const fetchButton = document.getElementById('upload-fetch-samples');
+        idcButtons.forEach(b => { b.disabled = true; });
+        if (fetchButton) fetchButton.disabled = true;
+
+        if (uploadStatus) {
+            uploadStatus.textContent =
+                'Fetching 10 public IDC samples (3 X-ray, 4 CT, 3 MRI)... This can take a few minutes.';
+            uploadStatus.style.display = 'block';
+        }
+
+        fetchSamplesController = new AbortController();
+        const timeout = setTimeout(() => {
+            if (fetchSamplesController) fetchSamplesController.abort();
+        }, 600000);
+
+        try {
+            const response = await fetch('/idc_fetch_samples', {
+                method: 'POST',
+                signal: fetchSamplesController.signal
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `HTTP error ${response.status}`);
+            }
+
+            currentPoolCounts = data.by_modality || {};
+            if (uploadStatus) uploadStatus.style.display = 'none';
+            const counts = (data.by_modality || {});
+            const parts = ['X-ray', 'CT', 'MRI']
+                .map(m => `${m}: ${counts[m] ?? 0}`)
+                .join(' · ');
+            const message = `Staged **${data.samples ?? 0}** IDC samples.\n` +
+                `_${parts}_\n\n` +
+                `Now click **X-Ray**, **CT** or **MRI** to analyze a random sample instantly ` +
+                `(click any response sentence to see it explained in plainer terms).`;
+            if (uploadResult) {
+                renderMarkdown(uploadResult, message);
+                makeResponseSentences(uploadResult);
+            }
+        } catch (error) {
+            if (uploadStatus) uploadStatus.style.display = 'none';
+            const message = (error.name === 'AbortError')
+                ? 'Fetching samples timed out after 10 minutes. Try again.'
+                : error.message;
+            displayUploadError(`Fetch Samples Error: ${message}`);
+        } finally {
+            clearTimeout(timeout);
+            fetchSamplesController = null;
+            idcButtons.forEach(b => { b.disabled = false; });
+            if (fetchButton) fetchButton.disabled = false;
+        }
+    }
+
+    function abortOngoingFetchSamples() {
+        if (fetchSamplesController) {
+            fetchSamplesController.abort();
+            fetchSamplesController = null;
+        }
+    }
+
+    function splitResponseSentences(text) {
+        return (text || '').match(/[^.!?\n]+[.!?]*(?:\s+|$)/g) || [text];
+    }
+
+    function makeResponseSentences(root) {
+        if (!root) return;
+        root.querySelectorAll('p, li').forEach(el => {
+            const text = el.textContent.trim();
+            if (text.length < 3) return;
+            const sentences = splitResponseSentences(text);
+            if (sentences.length <= 1 && !text.endsWith('.') && !text.endsWith('!')
+                && !text.endsWith('?')) {
+                return;
+            }
+            el.textContent = '';
+            sentences.forEach(s => {
+                const span = document.createElement('span');
+                span.className = 'resp-sentence';
+                span.textContent = s + ' ';
+                span.dataset.sentence = s.trim();
+                el.appendChild(span);
+            });
+        });
+    }
+
+    function hideRespExplain() {
+        const box = document.getElementById('resp-explain-box');
+        const content = document.getElementById('resp-explain-content');
+        if (box) { box.style.display = 'none'; box.classList.remove('loading'); }
+        if (content) content.innerHTML = '';
+    }
+
+    async function handleRespSentenceClick(event) {
+        const span = event.target.closest('.resp-sentence');
+        if (!span) return;
+        const sentence = span.dataset.sentence;
+        if (!sentence || !sentence.trim()) return;
+
+        const box = document.getElementById('resp-explain-box');
+        const content = document.getElementById('resp-explain-content');
+        if (!box || !content) return;
+
+        uploadResult.querySelectorAll('.resp-sentence').forEach(s => s.classList.remove('active'));
+        span.classList.add('active');
+        box.style.display = 'block';
+        box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        content.innerHTML = 'Generating a simpler explanation...';
+        box.classList.add('loading');
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 120000);
+        try {
+            const resp = await fetch('/explain_sentence', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sentence,
+                    modality: uploadModality && uploadModality.value
+                        ? uploadModality.value
+                        : 'Medical Image'
+                }),
+                signal: controller.signal
+            });
+            const data = await resp.json().catch(() => ({}));
+            box.classList.remove('loading');
+            if (!resp.ok) {
+                throw new Error(data.error || `HTTP error ${resp.status}`);
+            }
+            renderMarkdown(content, data.explanation || '');
+            makeResponseSentences(content);
+        } catch (error) {
+            box.classList.remove('loading');
+            content.textContent = (error.name === 'AbortError')
+                ? 'The explanation request timed out. Please try again.'
+                : `Error: ${error.message}`;
+        } finally {
+            clearTimeout(timeout);
         }
     }
 
@@ -678,6 +849,7 @@ document.addEventListener('DOMContentLoaded', () => {
             explainAbortController.abort();
             explainAbortController = null;
         }
+        abortOngoingFetchSamples();
     }
 
     initialize();

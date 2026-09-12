@@ -160,10 +160,20 @@
                     <button type="button" class="idc-button" data-idc-modality="CT">CT</button>
                     <button type="button" class="idc-button" data-idc-modality="MRI">MRI</button>
                 </div>
+                <div class="upload-idc-fetch-row">
+                    <button type="button" id="upload-fetch-samples" class="idc-button idc-button-fetch">
+                        Fetch 10 samples from IDC
+                    </button>
+                    <span class="upload-idc-hint">Prefetch ~10 mixed-modality samples so X-Ray/CT/MRI pick a random one instantly.</span>
+                </div>
                 <div id="upload-status" class="loading" style="display: none;"></div>
                 <div id="upload-error" class="error-message" style="display: none;"></div>
                 <div id="upload-preview-grid" class="upload-preview-grid"></div>
                 <div id="upload-result" class="upload-result"></div>
+                <div id="resp-explain-box" class="resp-explain-box" style="display: none;">
+                    <div class="resp-explain-header">What this means</div>
+                    <div id="resp-explain-content"></div>
+                </div>
             </div>
         </div>
 

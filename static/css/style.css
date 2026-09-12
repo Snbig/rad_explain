@@ -770,6 +770,81 @@ h2 {
     cursor: not-allowed;
 }
 
+.upload-idc-fetch-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 6px;
+}
+
+.idc-button-fetch {
+    background: #e8f0fe;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.idc-button-fetch:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.upload-idc-hint {
+    font-size: 12px;
+    color: #888;
+    max-width: 340px;
+    text-align: left;
+}
+
+/* --- Clickable sentences in the generated explanation --- */
+.resp-sentence {
+    cursor: pointer;
+    border-radius: 3px;
+    transition: background-color 0.15s ease;
+}
+
+.resp-sentence:hover {
+    background: #fdf3d0;
+    box-shadow: 0 0 0 1px #f9e9b8;
+}
+
+.resp-sentence.active {
+    background: #fdf3d0;
+    box-shadow: 0 0 0 1px #f9e9b8;
+}
+
+.resp-explain-box {
+    margin-top: 12px;
+    background: #fef8e7;
+    border: 1px solid #eedc9b;
+    border-radius: 6px;
+    padding: 12px 14px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #5f5a3a;
+}
+
+.resp-explain-box.loading {
+    color: #8a6d3b;
+}
+
+.resp-explain-header {
+    font-weight: 600;
+    color: #7a5c1e;
+    margin-bottom: 4px;
+}
+
+.resp-explain-box ul,
+.resp-explain-box ol {
+    margin: 4px 0 8px;
+    padding-left: 22px;
+}
+
+.resp-explain-box li {
+    margin-bottom: 2px;
+}
+
 #explanation-content ul,
 #explanation-content ol {
     margin: 4px 0;

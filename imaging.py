@@ -258,13 +258,13 @@ def process_upload_dicom(paths, max_slices=MAX_PROMPT_IMAGES):
 
 # --- NCI Imaging Data Commons (IDC) sample fetching ------------------------
 
-def search_idc_series(modality, preferred_body_parts=None):
-    """Pick one small public cancer series for *modality* ('X-ray', 'CT', 'MRI').
+def search_idc_series(modality, limit=3, preferred_body_parts=None):
+    """Pick *limit* small public cancer series for *modality*.
 
     Uses the `idc-index` package (lazily imported) to query the ~100 TB of
     public cancer imaging data harmonized by the NCI Imaging Data Commons into
-    DICOM. Returns metadata for a series with few instances / small size so it
-    downloads quickly and fits the MedGemma prompt.
+    DICOM. Returns metadata for series with few instances / small size so they
+    download quickly and fit the MedGemma prompt.
     """
     if modality not in IDC_MODALITY_TAGS:
         raise ValueError(
@@ -291,26 +291,31 @@ WHERE i.Modality IN ({in_mods})
   AND i.series_size_MB < {IDC_SIZE_MB_MAX}
 ORDER BY CASE WHEN i.BodyPartExamined IN ({in_body}) THEN 0 ELSE 1 END,
          random()
-LIMIT 10
+LIMIT 20
 """
     rows = client.sql_query(query)
     if rows is None or len(rows) == 0:
         raise ValueError(
             f"No public {modality} series found in IDC for this query.")
+    infos = []
     for r in rows.to_dict("records"):
         instances = int(r.get("n_instances") or 0)
         if 1 <= instances <= IDC_MAX_INSTANCES:
-            return {
+            infos.append({
                 "series_uid": r["SeriesInstanceUID"],
                 "collection_id": r.get("collection_id") or "",
                 "series_description": r.get("SeriesDescription") or "",
                 "body_part": r.get("BodyPartExamined") or "",
                 "size_mb": float(r.get("series_size_MB") or 0),
                 "instances": instances,
-            }
-    raise ValueError(
-        f"Only large {modality} series were found; none was small enough "
-        f"(<= {IDC_MAX_INSTANCES} instances) for this demo.")
+            })
+        if len(infos) >= limit:
+            break
+    if not infos:
+        raise ValueError(
+            f"Only large {modality} series were found; none was small enough "
+            f"(<= {IDC_MAX_INSTANCES} instances) for this demo.")
+    return infos
 
 
 def _download_series_from_gcs(client, series_uid, dest_dir):
@@ -388,9 +393,44 @@ def fetch_idc_sample(modality, dest_dir=None):
     modality and return (series_metadata, list_of_dicom_paths)."""
     import tempfile
 
-    info = search_idc_series(modality)
+    info = search_idc_series(modality, limit=1)[0]
     if dest_dir is None:
         dest_dir = Path(tempfile.mkdtemp(
             prefix=f"radexplain-idc-{info['series_uid'][:8]}-"))
     files = download_idc_series(info["series_uid"], dest_dir)
     return info, files
+
+
+def fetch_idc_sample_pool(modality, count, dest_root, max_preview_slices=6):
+    """Download and parse *count* small series of *modality* into a pool.
+
+    Persists each series under ``dest_root/<series_uid>`` and returns a list
+    of sample dicts holding the metadata, the local file paths and up to
+    ``max_preview_slices`` display previews. Undecodable series are skipped
+    (with a warning) instead of failing the whole batch.
+    """
+    import tempfile
+
+    dest_root = Path(dest_root)
+    dest_root.mkdir(parents=True, exist_ok=True)
+    infos = search_idc_series(modality, limit=count)
+    samples = []
+    for info in infos:
+        dir_name = info["series_uid"].replace(".", "")[:28]
+        series_dir = dest_root / dir_name
+        try:
+            files = download_idc_series(info["series_uid"], series_dir)
+            parsed = process_upload_dicom(files, max_slices=max_preview_slices)
+            samples.append({
+                "modality": modality,
+                "info": info,
+                "files": files,
+                "dir": str(series_dir),
+                "total_slices": parsed["total_slices"],
+                "previews": parsed["previews"],
+            })
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Skipping IDC %s series %s: %s",
+                           modality, info["series_uid"], e)
+            continue
+    return samples
